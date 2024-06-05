@@ -4,18 +4,21 @@ import { ExpressRelay } from "../target/types/express_relay";
 import { EzLend } from "../target/types/ez_lend";
 import { OpportunityAdapter } from "../target/types/opportunity_adapter";
 import {
-  createMint,
-  createAccount,
-  getAccount,
-  getOrCreateAssociatedTokenAccount,
-  getAssociatedTokenAddress,
-  transfer,
-  approve,
-  mintTo,
+  Token,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  createWrappedNativeAccount,
-  createSyncNativeInstruction,
+  // createMint,
+  // createAccount,
+  // getAccount,
+  // getOrCreateAssociatedTokenAccount,
+  // getAssociatedTokenAddress,
+  // transfer,
+  // approve,
+  // mintTo,
+  // TOKEN_PROGRAM_ID,
+  // ASSOCIATED_TOKEN_PROGRAM_ID,
+  // createWrappedNativeAccount,
+  // createSyncNativeInstruction,
 } from "@solana/spl-token";
 import {
   PublicKey,
@@ -24,6 +27,7 @@ import {
   VersionedTransaction,
   sendAndConfirmTransaction,
   Ed25519Program,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import { assert } from "chai";
 import { getTxSize } from "./helpers/size_tx";
@@ -37,6 +41,23 @@ import {
 import { sign } from "@noble/ed25519";
 import * as crypto from "crypto";
 
+import {
+  KaminoAction,
+  VanillaObligation,
+  WRAPPED_SOL_MINT,
+  idl as klendIdl,
+} from "@kamino-finance/klend-sdk";
+import { setupMarketWithLoan } from "./kamino_helpers/fixtures";
+import { Env } from "./kamino_helpers/types";
+import {
+  mintToUser,
+  reloadMarket,
+  updatePrice,
+  reloadReservesAndRefreshMarket,
+} from "./kamino_helpers/operations";
+import { toLamports } from "./kamino_helpers/utils";
+import { Price } from "./kamino_helpers/price";
+
 describe("express_relay", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
@@ -45,6 +66,10 @@ describe("express_relay", () => {
   const ezLend = anchor.workspace.EzLend as Program<EzLend>;
   const opportunityAdapter = anchor.workspace
     .OpportunityAdapter as Program<OpportunityAdapter>;
+  const klendProgramId = new PublicKey(
+    "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
+  );
+  // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -75,7 +100,6 @@ describe("express_relay", () => {
   const relayerRentReceiver = anchor.web3.Keypair.generate();
   const admin = anchor.web3.Keypair.generate();
 
-  const wsolMint = new PublicKey("So11111111111111111111111111111111111111112");
   let wsolTaUser;
   let wsolTaExpressRelay;
 
@@ -88,6 +112,7 @@ describe("express_relay", () => {
   console.log("relayerFeeReceiver: ", relayerFeeReceiver.publicKey.toBase58());
   console.log("admin: ", admin.publicKey.toBase58());
 
+  // set up mints, tokens, token accounts, approvals; initialize express relay
   before(async () => {
     let airdrop_signature_payer = await provider.connection.requestAirdrop(
       payer.publicKey,
@@ -105,19 +130,21 @@ describe("express_relay", () => {
     );
 
     // create mints
-    mintCollateral = await createMint(
+    mintCollateral = await Token.createMint(
       provider.connection,
       payer,
       mintCollateralAuthority.publicKey,
       mintCollateralAuthority.publicKey,
-      9
+      9,
+      TOKEN_PROGRAM_ID
     );
-    mintDebt = await createMint(
+    mintDebt = await Token.createMint(
       provider.connection,
       payer,
       mintDebtAuthority.publicKey,
       mintDebtAuthority.publicKey,
-      9
+      9,
+      TOKEN_PROGRAM_ID
     );
 
     protocolFeeReceiver = await PublicKey.findProgramAddressSync(
@@ -125,33 +152,59 @@ describe("express_relay", () => {
       protocol
     );
 
+    const tokenCollateral = new Token(
+      provider.connection,
+      mintCollateral.publicKey,
+      TOKEN_PROGRAM_ID,
+      payer
+    );
+    const tokenDebt = new Token(
+      provider.connection,
+      mintDebt.publicKey,
+      TOKEN_PROGRAM_ID,
+      payer
+    );
+
     // Initialize TAs
-    ataCollateralPayer = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer,
-      mintCollateral,
+    ataCollateralPayer = await tokenCollateral.getOrCreateAssociatedAccountInfo(
       payer.publicKey
     );
-    ataDebtPayer = await getOrCreateAssociatedTokenAccount(
-      provider.connection,
-      payer,
-      mintDebt,
+    ataDebtPayer = await tokenDebt.getOrCreateAssociatedAccountInfo(
       payer.publicKey
     );
-    ataCollateralRelayer = await getAssociatedTokenAddress(
-      mintCollateral,
+    // ataCollateralPayer = await getOrCreateAssociatedTokenAccount(
+    //   provider.connection,
+    //   payer,
+    //   mintCollateral,
+    //   payer.publicKey
+    // );
+    // ataDebtPayer = await getOrCreateAssociatedTokenAccount(
+    //   provider.connection,
+    //   payer,
+    //   mintDebt,
+    //   payer.publicKey
+    // );
+    ataCollateralRelayer = await Token.getAssociatedTokenAddress(
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+      TOKEN_PROGRAM_ID,
+      mintCollateral.publicKey,
       relayerSigner.publicKey
     );
-    ataDebtRelayer = await getAssociatedTokenAddress(
-      mintDebt,
+    ataDebtRelayer = await Token.getAssociatedTokenAddress(
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+      TOKEN_PROGRAM_ID,
+      mintDebt.publicKey,
       relayerSigner.publicKey
     );
     taCollateralProtocol = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("ata"), mintCollateral.toBuffer()],
+      [
+        anchor.utils.bytes.utf8.encode("ata"),
+        mintCollateral.publicKey.toBuffer(),
+      ],
       protocol
     );
     taDebtProtocol = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("ata"), mintDebt.toBuffer()],
+      [anchor.utils.bytes.utf8.encode("ata"), mintDebt.publicKey.toBuffer()],
       protocol
     );
 
@@ -164,31 +217,55 @@ describe("express_relay", () => {
       opportunityAdapter.programId
     );
 
-    wsolTaUser = await getOrCreateAssociatedTokenAccount(
+    const tokenWsol = new Token(
       provider.connection,
-      payer,
-      wsolMint,
+      WRAPPED_SOL_MINT,
+      TOKEN_PROGRAM_ID,
+      payer
+    );
+    wsolTaUser = await tokenWsol.getOrCreateAssociatedAccountInfo(
       payer.publicKey
     );
+    // wsolTaUser = await getOrCreateAssociatedTokenAccount(
+    //   provider.connection,
+    //   payer,
+    //   WRAPPED_SOL_MINT,
+    //   payer.publicKey
+    // );
     const fundWsolTaUserTx = new anchor.web3.Transaction().add(
       anchor.web3.SystemProgram.transfer({
         fromPubkey: payer.publicKey,
         toPubkey: wsolTaUser.address,
         lamports: 5 * LAMPORTS_PER_SOL,
       }),
-      createSyncNativeInstruction(wsolTaUser.address)
+      new TransactionInstruction({
+        keys: [
+          { pubkey: wsolTaUser.address, isSigner: false, isWritable: true },
+        ],
+        data: Buffer.from(new Uint8Array([17])),
+        programId: TOKEN_PROGRAM_ID,
+      })
+      // createSyncNativeInstruction(wsolTaUser.address)
     );
     await provider.connection.sendTransaction(fundWsolTaUserTx, [payer]);
-    await approve(
-      provider.connection,
-      payer,
+    await tokenWsol.approve(
       wsolTaUser.address,
       expressRelayAuthority[0],
-      payer.publicKey,
+      payer,
+      [],
       5 * LAMPORTS_PER_SOL
     );
+    // await approve(
+    //   provider.connection,
+    //   payer,
+    //   wsolTaUser.address,
+    //   expressRelayAuthority[0],
+    //   payer.publicKey,
+    //   5 * LAMPORTS_PER_SOL
+    // );
+
     wsolTaExpressRelay = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("ata"), wsolMint.toBuffer()],
+      [anchor.utils.bytes.utf8.encode("ata"), WRAPPED_SOL_MINT.toBuffer()],
       expressRelay.programId
     );
 
@@ -201,7 +278,7 @@ describe("express_relay", () => {
       .createTokenAcc({})
       .accounts({
         payer: payer.publicKey,
-        mint: mintCollateral,
+        mint: mintCollateral.publicKey,
         tokenAccount: taCollateralProtocol[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -213,7 +290,7 @@ describe("express_relay", () => {
       .createTokenAcc({})
       .accounts({
         payer: payer.publicKey,
-        mint: mintDebt,
+        mint: mintDebt.publicKey,
         tokenAccount: taDebtProtocol[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -222,72 +299,102 @@ describe("express_relay", () => {
       .rpc();
 
     // (collateral, payer)
-    await mintTo(
-      provider.connection,
-      payer,
-      mintCollateral,
+    await tokenCollateral.mintTo(
       ataCollateralPayer.address,
       mintCollateralAuthority,
-      1000,
       [],
-      undefined,
-      TOKEN_PROGRAM_ID
-    );
-    // (debt, payer)
-    await mintTo(
-      provider.connection,
-      payer,
-      mintDebt,
-      ataDebtPayer.address,
-      mintDebtAuthority,
-      1000,
-      [],
-      undefined,
-      TOKEN_PROGRAM_ID
-    );
-
-    // (collateral, protocol)
-    await mintTo(
-      provider.connection,
-      payer,
-      mintCollateral,
-      taCollateralProtocol[0],
-      mintCollateralAuthority,
-      10000,
-      [],
-      undefined,
-      TOKEN_PROGRAM_ID
-    );
-    // (debt, protocol)
-    await mintTo(
-      provider.connection,
-      payer,
-      mintDebt,
-      taDebtProtocol[0],
-      mintDebtAuthority,
-      10000,
-      [],
-      undefined,
-      TOKEN_PROGRAM_ID
-    );
-
-    // approve user's tokens to opportunity adapter
-    await approve(
-      provider.connection,
-      payer,
-      ataCollateralPayer.address,
-      opportunityAdapterAuthority[0],
-      payer.publicKey,
       1000
     );
-    await approve(
-      provider.connection,
-      payer,
-      ataDebtPayer.address,
-      opportunityAdapterAuthority[0],
-      payer.publicKey,
+
+    // await mintTo(
+    //   provider.connection,
+    //   payer,
+    //   mintCollateral,
+    //   ataCollateralPayer.address,
+    //   mintCollateralAuthority,
+    //   1000,
+    //   [],
+    //   undefined,
+    //   TOKEN_PROGRAM_ID
+    // );
+    // (debt, payer)
+    await tokenDebt.mintTo(ataDebtPayer.address, mintDebtAuthority, [], 1000);
+
+    // await mintTo(
+    //   provider.connection,
+    //   payer,
+    //   mintDebt.publicKey,
+    //   ataDebtPayer.address,
+    //   mintDebt.publicKeyAuthority,
+    //   1000,
+    //   [],
+    //   undefined,
+    //   TOKEN_PROGRAM_ID
+    // );
+
+    // (collateral, protocol)
+    await tokenCollateral.mintTo(
+      taCollateralProtocol[0],
+      mintCollateralAuthority,
+      [],
       10000
     );
+    // await mintTo(
+    //   provider.connection,
+    //   payer,
+    //   mintCollateral,
+    //   taCollateralProtocol[0],
+    //   mintCollateralAuthority,
+    //   10000,
+    //   [],
+    //   undefined,
+    //   TOKEN_PROGRAM_ID
+    // );
+    // (debt, protocol)
+    await tokenDebt.mintTo(taDebtProtocol[0], mintDebtAuthority, [], 10000);
+    // await mintTo(
+    //   provider.connection,
+    //   payer,
+    //   mintDebt.publicKey,
+    //   taDebtProtocol[0],
+    //   mintDebt.publicKeyAuthority,
+    //   10000,
+    //   [],
+    //   undefined,
+    //   TOKEN_PROGRAM_ID
+    // );
+
+    // approve user's tokens to opportunity adapter
+    await tokenCollateral.approve(
+      ataCollateralPayer.address,
+      opportunityAdapterAuthority[0],
+      payer,
+      [],
+      1000
+    );
+    // await approve(
+    //   provider.connection,
+    //   payer,
+    //   ataCollateralPayer.address,
+    //   opportunityAdapterAuthority[0],
+    //   payer.publicKey,
+    //   1000
+    // );
+    await tokenDebt.approve(
+      ataDebtPayer.address,
+      opportunityAdapterAuthority[0],
+      payer,
+      [],
+      10000
+    );
+    // await approve(
+    //   provider.connection,
+    //   payer,
+    //   ataDebtPayer.address,
+    //   opportunityAdapterAuthority[0],
+    //   payer.publicKey,
+    //   10000
+    // );
 
     await expressRelay.methods
       .initialize({
@@ -305,6 +412,62 @@ describe("express_relay", () => {
       .signers([relayerSigner])
       .rpc();
   });
+
+  // set up klend market and obligation
+  before(async () => {
+    console.log("GOT TO THE KAMINO SETUP");
+    const env: Env = {
+      provider: provider,
+      programId: klendProgramId,
+      admin: payer,
+      wallet: new anchor.Wallet(payer),
+      testCase: `${Date.now().toString()}-${
+        Math.floor(Math.random() * 1000000) + 1
+      }`,
+    };
+
+    const { kaminoMarket, obligation, liquidatorPath, liquidator } =
+      await setupMarketWithLoan({
+        loan: {
+          deposits: [["USDC", "130"]],
+          borrows: [["SOL", "4"]],
+        },
+        reserves: [
+          ["USDC", "2000"],
+          ["SOL", "2000"],
+          ["USDH", "2000"],
+        ],
+        env: env,
+      });
+
+    // give the liquidator enough USDC to not need to flash borrow
+    await mintToUser(
+      env,
+      kaminoMarket.getReserveBySymbol("USDC")!.getLiquidityMint(),
+      liquidator.publicKey,
+      toLamports(200, 6),
+      liquidator
+    );
+
+    await reloadMarket(env, kaminoMarket);
+
+    await updatePrice(
+      env,
+      kaminoMarket.getReserveBySymbol("SOL")!,
+      Price.SOL_USD_10
+    );
+    await reloadReservesAndRefreshMarket(env, kaminoMarket);
+
+    console.log("kaminoMarket: ", kaminoMarket);
+    console.log("obligation: ", obligation);
+    console.log("liquidatorPath: ", liquidatorPath);
+    console.log("liquidator: ", liquidator);
+    console.log("GOT THROUGH THE KAMINO SETUP");
+    // kaminoMarket.getAllObligationsForMarket(kaminoMarket)
+  });
+
+  // make klend obligation eligible for liquidation
+  before(async () => {});
 
   it("Create and liquidate vault", async () => {
     let vault_id_BN = new anchor.BN(0);
@@ -352,8 +515,8 @@ describe("express_relay", () => {
       .accounts({
         vault: vault[0],
         payer: payer.publicKey,
-        collateralMint: mintCollateral,
-        debtMint: mintDebt,
+        collateralMint: mintCollateral.publicKey,
+        debtMint: mintDebt.publicKey,
         collateralAtaPayer: ataCollateralPayer.address,
         collateralTaProgram: taCollateralProtocol.address,
         debtAtaPayer: ataDebtPayer.address,
@@ -405,8 +568,8 @@ describe("express_relay", () => {
         vault: vault[0],
         payer: relayerSigner.publicKey,
         // payer: payer.publicKey,
-        collateralMint: mintCollateral,
-        debtMint: mintDebt,
+        collateralMint: mintCollateral.publicKey,
+        debtMint: mintDebt.publicKey,
         collateralAtaPayer: ataCollateralRelayer,
         // collateralAtaPayer: ataCollateralPayer.address,
         collateralTaProgram: taCollateralProtocol.address,
@@ -501,7 +664,7 @@ describe("express_relay", () => {
         relayerFeeReceiver: relayerFeeReceiver.publicKey,
         protocolConfig: protocolConfig[0],
         expressRelayMetadata: expressRelayMetadata[0],
-        wsolMint: wsolMint,
+        wsolMint: WRAPPED_SOL_MINT,
         wsolTaUser: wsolTaUser.address,
         wsolTaExpressRelay: wsolTaExpressRelay[0],
         expressRelayAuthority: expressRelayAuthority[0],
@@ -534,7 +697,7 @@ describe("express_relay", () => {
       [
         anchor.utils.bytes.utf8.encode("token_expectation"),
         payer.publicKey.toBuffer(),
-        mintCollateral.toBuffer(),
+        mintCollateral.publicKey.toBuffer(),
       ],
       opportunityAdapter.programId
     );
@@ -543,14 +706,14 @@ describe("express_relay", () => {
       [
         anchor.utils.bytes.utf8.encode("token_expectation"),
         payer.publicKey.toBuffer(),
-        mintDebt.toBuffer(),
+        mintDebt.publicKey.toBuffer(),
       ],
       opportunityAdapter.programId
     );
 
     const remainingAccountsOpportunityAdapter = [
       {
-        pubkey: mintDebt,
+        pubkey: mintDebt.publicKey,
         isWritable: false,
         isSigner: false,
       },
@@ -570,7 +733,7 @@ describe("express_relay", () => {
         isSigner: false,
       },
       {
-        pubkey: mintCollateral,
+        pubkey: mintCollateral.publicKey,
         isWritable: false,
         isSigner: false,
       },
@@ -592,9 +755,9 @@ describe("express_relay", () => {
     ];
     const validUntilOpportunityAdapter = new anchor.BN(100_000_000_000_000);
     const buyTokens = [collateral_amount];
-    const buyMints = [mintCollateral];
+    const buyMints = [mintCollateral.publicKey];
     const sellTokens = [debt_amount];
-    const sellMints = [mintDebt];
+    const sellMints = [mintDebt.publicKey];
     let msgOpportunityAdapter1 = new Uint8Array(2);
     msgOpportunityAdapter1[0] = buyTokens.length;
     msgOpportunityAdapter1[1] = sellTokens.length;

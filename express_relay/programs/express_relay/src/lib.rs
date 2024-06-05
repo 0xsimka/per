@@ -234,7 +234,6 @@ pub mod express_relay {
         // permission.bump = ctx.bumps.permission;
         permission_data.balance = permission.to_account_info().lamports();
         permission_data.bid_amount = data.bid_amount;
-        msg!("permission_data {:p}", permission_data);
 
         Ok(())
     }

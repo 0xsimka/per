@@ -1,0 +1,3 @@
+[submodule "kamino-lending-liquidations-bot"]
+	path = kamino-lending-liquidations-bot
+	url = git@github.com:hubbleprotocol/kamino-lending-liquidations-bot.git

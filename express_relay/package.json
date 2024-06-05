@@ -5,8 +5,10 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.0",
+    "@hubbleprotocol/scope-sdk": "^3.0.6",
+    "@kamino-finance/klend-sdk": "2.10.8",
     "@noble/ed25519": "^1.6.0",
-    "@solana/spl-token": "^0.4.6",
+    "@solana/spl-token": "^0.1.8",
     "bn.js": "^5.2.1",
     "crypto": "^1.0.1"
   },

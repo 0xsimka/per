@@ -24,3 +24,6 @@ per_multicall/latestEnvironment.json
 **/target/
 node_modules
 .idea
+
+# tmp run jsons
+express_relay/tmp/
