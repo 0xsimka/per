@@ -1,4 +1,4 @@
-import { PublicKey } from "@solana/web3.js";
+import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 
 // COMPACT ARRAY
 
@@ -69,5 +69,70 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
     sizeBlockhash +
     sizeNInstructions +
     ixsSize
+  );
+};
+
+export const getVersionedTxSize = (
+  tx: VersionedTransaction,
+  feePayer: PublicKey
+): number => {
+  const feePayerPk = [feePayer.toBase58()];
+
+  const accounts = new Set<string>(feePayerPk);
+
+  tx.message.staticAccountKeys.forEach((key) => {
+    accounts.add(key.toBase58());
+  });
+
+  const lookupSize = tx.message.addressTableLookups.reduce((acc, lookup) => {
+    const nWritable = lookup.writableIndexes.length;
+    const nReadable = lookup.readonlyIndexes.length;
+
+    return (
+      acc +
+      32 + // LUT address size
+      compactArraySize(nWritable, 1) +
+      compactArraySize(nReadable, 1)
+    );
+  }, 0);
+
+  const ixsSize = tx.message.compiledInstructions.reduce((acc, ix) => {
+    const nIndexes = ix.accountKeyIndexes.length;
+    const opaqueData = ix.data.length;
+
+    console.log("n accounts in ix: ", nIndexes);
+    console.log("length of data in ix: ", opaqueData);
+    console.log("");
+    return (
+      acc +
+      1 + // PID index
+      compactArraySize(nIndexes, 1) +
+      compactArraySize(opaqueData, 1)
+    );
+  }, 0);
+
+  let nSigners = tx.message.header.numRequiredSignatures;
+
+  const sizeSignatures = compactArraySize(nSigners, 64);
+  const sizeHeader = 3;
+  const sizeAccounts = compactArraySize(accounts.size, 32);
+  const sizeBlockhash = 32;
+  const sizeNInstructions = compactHeader(
+    tx.message.compiledInstructions.length
+  );
+
+  console.log("Size of signatures: ", sizeSignatures);
+  console.log("Size of accounts: ", sizeAccounts);
+  console.log("Size of number of instructions: ", sizeNInstructions);
+  console.log("Size of ixs: ", ixsSize);
+
+  return (
+    sizeSignatures +
+    sizeHeader +
+    sizeAccounts +
+    sizeBlockhash +
+    sizeNInstructions +
+    ixsSize +
+    lookupSize
   );
 };

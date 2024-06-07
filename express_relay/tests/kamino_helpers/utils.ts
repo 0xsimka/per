@@ -4,6 +4,8 @@ import {
   NULL_PUBKEY,
   // sendAndConfirmVersionedTransaction,
   KaminoAction,
+  PubkeyHashMap,
+  KaminoMarket,
 } from "@kamino-finance/klend-sdk";
 import {
   ReserveConfigFields,
@@ -33,6 +35,7 @@ import {
   Connection,
   Commitment,
   SendOptions,
+  PublicKey,
 } from "@solana/web3.js";
 import { Env } from "./types";
 
@@ -262,4 +265,60 @@ export function sleep(ms: number): Promise<void> {
     return Promise.resolve();
   }
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export const instructionEquals = (
+  ix1: TransactionInstruction,
+  ix2: TransactionInstruction
+) =>
+  ix1.programId.equals(ix2.programId) &&
+  arrayDeepEquals(
+    ix1.keys,
+    ix2.keys,
+    (a, b) =>
+      a.isSigner === b.isSigner &&
+      a.isWritable === b.isWritable &&
+      a.pubkey.equals(b.pubkey)
+  ) &&
+  arrayDeepEquals(
+    Array.from(ix1.data),
+    Array.from(ix2.data),
+    (a, b) => a === b
+  );
+
+export function arrayDeepEquals<T, U>(
+  array1: Readonly<T[]>,
+  array2: Readonly<U[]>,
+  eq: (a: T, b: U) => boolean
+): boolean {
+  if (array1.length !== array2.length) {
+    return false;
+  }
+  return array1.reduce((prev, current, index) => {
+    const other = array2[index];
+    if (other == null) {
+      return false;
+    }
+    return prev && eq(current, other);
+  }, true);
+}
+
+export async function loadMarkets(
+  c: Connection,
+  programId: PublicKey,
+  marketKeys: PublicKey[]
+): Promise<Map<PublicKey, KaminoMarket>> {
+  const markets = new PubkeyHashMap<PublicKey, KaminoMarket>();
+  const loadMarkets = new Array<Promise<void>>();
+  for (const market of marketKeys) {
+    const load = KaminoMarket.load(c, market, programId).then((km) => {
+      if (!km) {
+        throw new Error(`Market ${market.toBase58()} not found`);
+      }
+      markets.set(market, km);
+    });
+    loadMarkets.push(load);
+  }
+  await Promise.all(loadMarkets);
+  return markets;
 }

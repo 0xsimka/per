@@ -10,7 +10,8 @@
     "@noble/ed25519": "^1.6.0",
     "@solana/spl-token": "^0.1.8",
     "bn.js": "^5.2.1",
-    "crypto": "^1.0.1"
+    "crypto": "^1.0.1",
+    "winston": "^3.8.2"
   },
   "devDependencies": {
     "@types/bn.js": "^5.1.0",

@@ -1,3 +1,4 @@
+import Decimal from "decimal.js";
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { ExpressRelay } from "../target/types/express_relay";
@@ -29,8 +30,8 @@ import {
   Ed25519Program,
   TransactionInstruction,
 } from "@solana/web3.js";
-import { assert } from "chai";
-import { getTxSize } from "./helpers/size_tx";
+import { assert, config } from "chai";
+import { getTxSize, getVersionedTxSize } from "./helpers/size_tx";
 import { waitForNewBlock } from "./helpers/sleep";
 import {
   convertWordArrayToBuffer,
@@ -43,6 +44,7 @@ import * as crypto from "crypto";
 
 import {
   KaminoAction,
+  KaminoObligation,
   VanillaObligation,
   WRAPPED_SOL_MINT,
   idl as klendIdl,
@@ -57,6 +59,16 @@ import {
 } from "./kamino_helpers/operations";
 import { toLamports } from "./kamino_helpers/utils";
 import { Price } from "./kamino_helpers/price";
+import {
+  getLiquidationLookupTables,
+  getMarketAccounts,
+  liquidateAndRedeem,
+} from "./kamino_helpers/liquidate";
+import {
+  checkLiquidate,
+  tryLiquidateObligation,
+} from "./kamino_helpers/tryLiquidate";
+import { createAndPopulateLookupTable } from "./helpers/lookupTable";
 
 describe("express_relay", () => {
   // Configure the client to use the local cluster.
@@ -70,6 +82,8 @@ describe("express_relay", () => {
     "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
   );
   // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
+
+  const protocolLiquidate: string = "none"; // 'ezlend'
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -106,6 +120,29 @@ describe("express_relay", () => {
   let expressRelayMetadata;
   let splitProtocolDefault = new anchor.BN(5000);
   let splitRelayer = new anchor.BN(2000);
+
+  const env: Env = {
+    provider: provider,
+    programId: klendProgramId,
+    admin: payer,
+    wallet: new anchor.Wallet(payer),
+    testCase: `${Date.now().toString()}-${
+      Math.floor(Math.random() * 1000000) + 1
+    }`,
+  };
+
+  let kaminoMarket;
+  let obligation;
+  let liquidatorPath;
+  let liquidator;
+  let kaminoLiquidator: anchor.web3.Keypair;
+
+  let obligPre;
+  let obligPost;
+  let configLiquidation;
+
+  let ixsKaminoLiq;
+  let kaminoLiquidationLookupTables;
 
   console.log("payer: ", payer.publicKey.toBase58());
   console.log("relayerSigner: ", relayerSigner.publicKey.toBase58());
@@ -413,20 +450,10 @@ describe("express_relay", () => {
       .rpc();
   });
 
-  // set up klend market and obligation
+  // set up klend market and obligation, undercollateralize by pulling price down
   before(async () => {
     console.log("GOT TO THE KAMINO SETUP");
-    const env: Env = {
-      provider: provider,
-      programId: klendProgramId,
-      admin: payer,
-      wallet: new anchor.Wallet(payer),
-      testCase: `${Date.now().toString()}-${
-        Math.floor(Math.random() * 1000000) + 1
-      }`,
-    };
-
-    const { kaminoMarket, obligation, liquidatorPath, liquidator } =
+    let { kaminoMarket, obligation, liquidatorPath, liquidator } =
       await setupMarketWithLoan({
         loan: {
           deposits: [["USDC", "130"]],
@@ -439,6 +466,42 @@ describe("express_relay", () => {
         ],
         env: env,
       });
+
+    const overrides = {
+      thresholdBufferFactor: new Decimal("1"),
+      liquidationMethod: undefined,
+      ignoreNegativeProfit: false,
+    };
+    configLiquidation = {
+      maxObligationRetries: 0,
+      txConfig: {},
+      slippageConfig: {
+        pxSlippageBps: 10,
+        swapSlippageBps: 50,
+      },
+      overrides: overrides,
+    };
+    let marketAccs = await getMarketAccounts(
+      provider.connection,
+      "localnet",
+      klendProgramId,
+      new PublicKey(kaminoMarket.address),
+      configLiquidation,
+      []
+    );
+    let { reserveAutodeleverageStatus } = marketAccs;
+
+    obligPre = await kaminoMarket.getObligationByAddress(obligation);
+
+    let runCheckPre = checkLiquidate(kaminoMarket, obligPre, new Decimal("1"));
+    console.log(runCheckPre);
+    let liquidationScenarioPre = tryLiquidateObligation(
+      kaminoMarket,
+      reserveAutodeleverageStatus,
+      obligPre,
+      new Decimal("1")
+    );
+    console.log("LIQUIDATION SCENARIO PRE: ", liquidationScenarioPre);
 
     // give the liquidator enough USDC to not need to flash borrow
     await mintToUser(
@@ -454,7 +517,7 @@ describe("express_relay", () => {
     await updatePrice(
       env,
       kaminoMarket.getReserveBySymbol("SOL")!,
-      Price.SOL_USD_10
+      Price.SOL_USD_30
     );
     await reloadReservesAndRefreshMarket(env, kaminoMarket);
 
@@ -463,11 +526,47 @@ describe("express_relay", () => {
     console.log("liquidatorPath: ", liquidatorPath);
     console.log("liquidator: ", liquidator);
     console.log("GOT THROUGH THE KAMINO SETUP");
-    // kaminoMarket.getAllObligationsForMarket(kaminoMarket)
-  });
 
-  // make klend obligation eligible for liquidation
-  before(async () => {});
+    obligPost = await kaminoMarket.getObligationByAddress(obligation);
+
+    let runCheckPost = checkLiquidate(
+      kaminoMarket,
+      obligPost,
+      new Decimal("1")
+    );
+    console.log(runCheckPost);
+    let liquidationScenarioPost = tryLiquidateObligation(
+      kaminoMarket,
+      reserveAutodeleverageStatus,
+      obligPost,
+      new Decimal("1")
+    );
+    //   console.log("LIQUIDATION SCENARIO Post: ", liquidationScenarioPost);
+    // });
+
+    // it("Liquidate the Kamino obligation", async () => {
+    let liquidationAmount: number = 4;
+    ixsKaminoLiq = await liquidateAndRedeem(
+      kaminoMarket,
+      liquidator,
+      liquidationAmount,
+      kaminoMarket.getReserveBySymbol("SOL"),
+      kaminoMarket.getReserveBySymbol("USDC"),
+      obligPost,
+      configLiquidation
+    );
+
+    kaminoLiquidator = liquidator;
+
+    kaminoLiquidationLookupTables = await getLiquidationLookupTables(
+      provider.connection,
+      klendProgramId,
+      new PublicKey(kaminoMarket.address),
+      liquidator
+    );
+    console.log("KAMINO LIQUIDATION LOOKUP TABLES");
+    console.log(kaminoLiquidationLookupTables);
+  });
 
   it("Create and liquidate vault", async () => {
     let vault_id_BN = new anchor.BN(0);
@@ -518,9 +617,9 @@ describe("express_relay", () => {
         collateralMint: mintCollateral.publicKey,
         debtMint: mintDebt.publicKey,
         collateralAtaPayer: ataCollateralPayer.address,
-        collateralTaProgram: taCollateralProtocol.address,
+        collateralTaProgram: taCollateralProtocol[0],
         debtAtaPayer: ataDebtPayer.address,
-        debtTaProgram: taDebtProtocol.address,
+        debtTaProgram: taDebtProtocol[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
@@ -572,10 +671,10 @@ describe("express_relay", () => {
         debtMint: mintDebt.publicKey,
         collateralAtaPayer: ataCollateralRelayer,
         // collateralAtaPayer: ataCollateralPayer.address,
-        collateralTaProgram: taCollateralProtocol.address,
+        collateralTaProgram: taCollateralProtocol[0],
         debtAtaPayer: ataDebtRelayer,
         // debtAtaPayer: ataDebtPayer.address,
-        debtTaProgram: taDebtProtocol.address,
+        debtTaProgram: taDebtProtocol[0],
         permission: permission[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
@@ -808,7 +907,14 @@ describe("express_relay", () => {
         ],
         opportunityAdapter.programId
       );
-    const indexCheckTokenBalances = 4;
+    let indexCheckTokenBalances;
+    if (protocolLiquidate == "ezlend") {
+      indexCheckTokenBalances = 4;
+    } else if (protocolLiquidate == "kamino") {
+      indexCheckTokenBalances = 12;
+    } else if (protocolLiquidate == "none") {
+      indexCheckTokenBalances = 2;
+    }
     const ixInitializeTokenExpectations = await opportunityAdapter.methods
       .initializeTokenExpectations({
         sellTokens: sellTokens,
@@ -890,9 +996,21 @@ describe("express_relay", () => {
 
     transaction.add(ixPermission); // 48, 40 + 8
     transaction.add(ixInitializeTokenExpectations); // 56, variable (98 w 1 buy/1 sell) + 8
-    transaction.add(ixLiquidate); // 88, 32 + 8
-    transaction.add(ixSigVerifyOpportunityAdapter); // 0, 136 + 8
+
+    if (protocolLiquidate == "ezlend") {
+      // ez lend
+      transaction.add(ixLiquidate); // 88, 32 + 8
+    } else if (protocolLiquidate == "kamino") {
+      // kamino lend
+      transaction.add(...ixsKaminoLiq);
+    } else if (protocolLiquidate == "none") {
+    } else {
+      throw new Error("Invalid protocol liquidation");
+    }
+
+    // transaction.add(ixSigVerifyOpportunityAdapter); // 0, 136 + 8
     if (transaction.instructions.length != indexCheckTokenBalances) {
+      console.log("txs length here is ", transaction.instructions.length);
       throw new Error(
         "Need to match the check token balances ix with the prespecified index"
       );
@@ -900,14 +1018,6 @@ describe("express_relay", () => {
     transaction.add(ixCheckTokenBalances); // 40, 0 + 8
     transaction.add(ixSigVerifyExpressRelay); // 0, 136 + 8
     transaction.add(ixDepermission); // 120, 104 + 8
-
-    console.log("DATA FOR DEPERMISSION");
-    console.log(vault_id_bytes);
-    console.log(msgExpressRelay);
-    console.log("DIGEST EXPRESS RELAY", digestExpressRelay);
-    console.log(signatureExpressRelay);
-    console.log(validUntilExpressRelay.toNumber());
-    console.log(ixDepermission.data);
 
     let solProtocolPre = await provider.connection.getBalance(
       protocolFeeReceiver[0]
@@ -928,102 +1038,79 @@ describe("express_relay", () => {
     );
 
     // get lookup table accounts
-    const accounts = new Set<PublicKey>();
-    const accounts2 = new Set<PublicKey>();
-    transaction.instructions.reduce((acc, ix) => {
-      ix.keys.forEach(({ pubkey, isSigner }) => {
-        if (accounts.size < 30) {
-          accounts.add(pubkey);
-        } else if (!accounts.has(pubkey)) {
-          accounts2.add(pubkey);
-        }
-      });
+    const accountsGlobal = new Set<PublicKey>();
+    const accountsProtocol = new Set<PublicKey>();
 
-      accounts2.add(ix.programId);
+    // globals
+    accountsGlobal.add(relayerSigner.publicKey);
+    accountsGlobal.add(relayerFeeReceiver.publicKey);
+    accountsGlobal.add(relayerRentReceiver.publicKey);
+    accountsGlobal.add(expressRelayMetadata[0]);
+    accountsGlobal.add(WRAPPED_SOL_MINT);
+    accountsGlobal.add(wsolTaExpressRelay[0]);
+    accountsGlobal.add(opportunityAdapterAuthority[0]);
+    accountsGlobal.add(expressRelayAuthority[0]);
 
-      return accounts.size;
-    }, 0);
-    console.log("LENGTH OF ACCOUNTS: ", accounts.size);
-    console.log("LENGTH OF ACCOUNTS2: ", accounts2.size);
+    // programs
+    accountsGlobal.add(anchor.web3.SystemProgram.programId);
+    accountsGlobal.add(TOKEN_PROGRAM_ID);
+    accountsGlobal.add(anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY);
+    accountsGlobal.add(ASSOCIATED_TOKEN_PROGRAM_ID);
+    accountsGlobal.add(expressRelay.programId);
+    accountsGlobal.add(opportunityAdapter.programId);
 
-    // create Lookup table
-    let transactionLookupTable = new anchor.web3.Transaction();
-    let slot = (await provider.connection.getSlot()) - 1;
-    // const slots = await provider.connection.getBlocks(slot - 20);
-    // console.log(slots);
-    const [lookupTableInst, lookupTableAddress] =
-      AddressLookupTableProgram.createLookupTable({
-        authority: relayerSigner.publicKey,
-        payer: relayerSigner.publicKey,
-        recentSlot: slot,
-      });
-    transactionLookupTable.add(lookupTableInst);
-    const extendInstruction = AddressLookupTableProgram.extendLookupTable({
-      payer: relayerSigner.publicKey,
-      authority: relayerSigner.publicKey,
-      lookupTable: lookupTableAddress,
-      addresses: Array.from(accounts),
-    });
-    transactionLookupTable.add(extendInstruction);
-    console.log(
-      "SIZE of transaction (create lookup tables): ",
-      getTxSize(transactionLookupTable, relayerSigner.publicKey)
+    // per protocol
+    accountsProtocol.add(protocol);
+    accountsProtocol.add(protocolFeeReceiver[0]);
+    accountsProtocol.add(protocolConfig[0]);
+    accountsProtocol.add(mintCollateral.publicKey);
+    accountsProtocol.add(mintDebt.publicKey);
+    accountsProtocol.add(taCollateralProtocol[0]);
+    accountsProtocol.add(taDebtProtocol[0]);
+    accountsProtocol.add(ataCollateralRelayer);
+    accountsProtocol.add(ataDebtRelayer);
+    // could potentially add tokenExpectationCollateral and tokenExpectationDebt if still doesn't fit
+
+    console.log("LENGTH OF ACCOUNTS (GLOBAL): ", accountsGlobal.size);
+    console.log("LENGTH OF ACCOUNTS (PROTOCOL): ", accountsProtocol.size);
+
+    // create Lookup tables
+    const lookupTableGlobal = await createAndPopulateLookupTable(
+      provider.connection,
+      accountsGlobal,
+      relayerSigner,
+      relayerSigner
     );
-    let signatureLookupTable = await provider.connection
-      .sendTransaction(transactionLookupTable, [relayerSigner], {})
-      .catch((err) => {
-        console.log(err);
-      });
-    const latestBlockHashLookupTable =
-      await provider.connection.getLatestBlockhash();
-    let txResponseLookupTable = await provider.connection.confirmTransaction({
-      blockhash: latestBlockHashLookupTable.blockhash,
-      lastValidBlockHeight: latestBlockHashLookupTable.lastValidBlockHeight,
-      signature: signatureLookupTable,
-    });
-    console.log("Lookup table created");
-
-    // add more to Lookup table
-    let transactionLookupTable2 = new anchor.web3.Transaction();
-    let slot2 = (await provider.connection.getSlot()) - 1;
-    const extendInstruction2 = AddressLookupTableProgram.extendLookupTable({
-      payer: relayerSigner.publicKey,
-      authority: relayerSigner.publicKey,
-      lookupTable: lookupTableAddress,
-      addresses: Array.from(accounts2),
-    });
-    transactionLookupTable2.add(extendInstruction2);
-    console.log(
-      "SIZE of transaction (add to lookup tables): ",
-      getTxSize(transactionLookupTable2, relayerSigner.publicKey)
+    const lookupTableProtocol = await createAndPopulateLookupTable(
+      provider.connection,
+      accountsProtocol,
+      relayerSigner,
+      relayerSigner
     );
-    let signatureLookupTable2 = await provider.connection
-      .sendTransaction(transactionLookupTable2, [relayerSigner], {})
-      .catch((err) => {
-        console.log(err);
-      });
-    const latestBlockHashLookupTable2 =
-      await provider.connection.getLatestBlockhash();
-    let txResponseLookupTable2 = await provider.connection.confirmTransaction({
-      blockhash: latestBlockHashLookupTable2.blockhash,
-      lastValidBlockHeight: latestBlockHashLookupTable2.lastValidBlockHeight,
-      signature: signatureLookupTable2,
-    });
-    console.log("Lookup table added to");
-
-    // sleep to allow the lookup table to activate
-    await waitForNewBlock(provider.connection, 2);
 
     // construct original tx with lookup table
-    const lookupTableAccount = (
-      await provider.connection.getAddressLookupTable(lookupTableAddress)
+    const lookupTableGlobalAccount = (
+      await provider.connection.getAddressLookupTable(lookupTableGlobal)
     ).value;
+    const lookupTableProtocolAccount = (
+      await provider.connection.getAddressLookupTable(lookupTableProtocol)
+    ).value;
+
+    let allLookupTables = [
+      lookupTableGlobalAccount,
+      lookupTableProtocolAccount,
+    ];
+
+    if (protocolLiquidate == "kamino") {
+      allLookupTables = allLookupTables.concat(kaminoLiquidationLookupTables);
+    }
+
     const latestBlockHash = await provider.connection.getLatestBlockhash();
     const messageV0 = new TransactionMessage({
       payerKey: relayerSigner.publicKey,
       recentBlockhash: latestBlockHash.blockhash,
       instructions: transaction.instructions, // note this is an array of instructions
-    }).compileToV0Message([lookupTableAccount]);
+    }).compileToV0Message(allLookupTables);
 
     // create a v0 transaction from the v0 message
     const transactionV0 = new VersionedTransaction(messageV0);
@@ -1035,10 +1122,18 @@ describe("express_relay", () => {
       "JSON Stringified tx (V0) object: ",
       JSON.stringify(transactionV0)
     );
-    console.log("LENGTH OF versioned tx: ", messageV0.serialize().length);
+    const sizeVersionedTx = getVersionedTxSize(
+      transactionV0,
+      relayerSigner.publicKey
+    );
+
+    console.log("ESTIMATE OF versioned tx size: ", sizeVersionedTx);
+    console.log("LENGTH OF versioned msg: ", messageV0.serialize().length);
 
     // sign the v0 transaction
     transactionV0.sign([relayerSigner]);
+
+    console.log("LENGTH OF versioned tx: ", transactionV0.serialize().length);
 
     // send and confirm the transaction
     // const txResponse = await provider.connection.sendTransaction(transactionV0); // {skipPreflight: true}
