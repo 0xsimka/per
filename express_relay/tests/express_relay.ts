@@ -69,6 +69,7 @@ import {
   tryLiquidateObligation,
 } from "./kamino_helpers/tryLiquidate";
 import { createAndPopulateLookupTable } from "./helpers/lookupTable";
+import { initializeFarmsForReserve } from "./kamino_helpers/kamino/initFarms";
 
 describe("express_relay", () => {
   // Configure the client to use the local cluster.
@@ -83,7 +84,7 @@ describe("express_relay", () => {
   );
   // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
 
-  const protocolLiquidate: string = "none"; // 'ezlend'
+  const protocolLiquidate: string = "kamino"; // 'ezlend'
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -452,7 +453,6 @@ describe("express_relay", () => {
 
   // set up klend market and obligation, undercollateralize by pulling price down
   before(async () => {
-    console.log("GOT TO THE KAMINO SETUP");
     let { kaminoMarket, obligation, liquidatorPath, liquidator } =
       await setupMarketWithLoan({
         loan: {
@@ -466,6 +466,19 @@ describe("express_relay", () => {
         ],
         env: env,
       });
+
+    initializeFarmsForReserve(
+      env,
+      new PublicKey(kaminoMarket.address),
+      new PublicKey(kaminoMarket.getReserveBySymbol("USDC").address),
+      "Collateral"
+    );
+    initializeFarmsForReserve(
+      env,
+      new PublicKey(kaminoMarket.address),
+      new PublicKey(kaminoMarket.getReserveBySymbol("SOL").address),
+      "Debt"
+    );
 
     const overrides = {
       thresholdBufferFactor: new Decimal("1"),
@@ -493,8 +506,6 @@ describe("express_relay", () => {
 
     obligPre = await kaminoMarket.getObligationByAddress(obligation);
 
-    let runCheckPre = checkLiquidate(kaminoMarket, obligPre, new Decimal("1"));
-    console.log(runCheckPre);
     let liquidationScenarioPre = tryLiquidateObligation(
       kaminoMarket,
       reserveAutodeleverageStatus,
@@ -564,8 +575,6 @@ describe("express_relay", () => {
       new PublicKey(kaminoMarket.address),
       liquidator
     );
-    console.log("KAMINO LIQUIDATION LOOKUP TABLES");
-    console.log(kaminoLiquidationLookupTables);
   });
 
   it("Create and liquidate vault", async () => {
@@ -852,6 +861,7 @@ describe("express_relay", () => {
         isSigner: false,
       },
     ];
+
     const validUntilOpportunityAdapter = new anchor.BN(100_000_000_000_000);
     const buyTokens = [collateral_amount];
     const buyMints = [mintCollateral.publicKey];
@@ -909,9 +919,9 @@ describe("express_relay", () => {
       );
     let indexCheckTokenBalances;
     if (protocolLiquidate == "ezlend") {
-      indexCheckTokenBalances = 4;
+      indexCheckTokenBalances = 3;
     } else if (protocolLiquidate == "kamino") {
-      indexCheckTokenBalances = 12;
+      indexCheckTokenBalances = 17;
     } else if (protocolLiquidate == "none") {
       indexCheckTokenBalances = 2;
     }
@@ -927,7 +937,8 @@ describe("express_relay", () => {
         relayer: relayerSigner.publicKey,
         user: payer.publicKey,
         opportunityAdapterAuthority: opportunityAdapterAuthority[0],
-        signatureAccounting: signatureAccountingOpportunityAdapter[0],
+        signatureAccounting: signatureAccountingExpressRelay[0], // TODO: fix the contracts to have only one sigver in ExpressRelay
+        // signatureAccounting: signatureAccountingOpportunityAdapter[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -1058,6 +1069,7 @@ describe("express_relay", () => {
     accountsGlobal.add(ASSOCIATED_TOKEN_PROGRAM_ID);
     accountsGlobal.add(expressRelay.programId);
     accountsGlobal.add(opportunityAdapter.programId);
+    accountsGlobal.add(Ed25519Program.programId);
 
     // per protocol
     accountsProtocol.add(protocol);
@@ -1069,6 +1081,8 @@ describe("express_relay", () => {
     accountsProtocol.add(taDebtProtocol[0]);
     accountsProtocol.add(ataCollateralRelayer);
     accountsProtocol.add(ataDebtRelayer);
+    accountsProtocol.add(tokenExpectationCollateral[0]);
+    accountsProtocol.add(tokenExpectationDebt[0]);
     // could potentially add tokenExpectationCollateral and tokenExpectationDebt if still doesn't fit
 
     console.log("LENGTH OF ACCOUNTS (GLOBAL): ", accountsGlobal.size);
