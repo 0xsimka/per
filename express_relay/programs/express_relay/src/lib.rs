@@ -2,7 +2,7 @@ pub mod error;
 pub mod state;
 pub mod utils;
 
-use anchor_lang::{prelude::*, system_program::System};
+use anchor_lang::{prelude::*, system_program::{System, create_account, CreateAccount}};
 use anchor_lang::solana_program::sysvar::instructions as tx_instructions;
 use solana_program::{hash, clock::Clock, serialize_utils::read_u16, sysvar::instructions::{load_current_index_checked, load_instruction_at_checked}};
 use anchor_syn::codegen::program::common::sighash;
@@ -29,28 +29,16 @@ pub fn handle_wsol_transfer<'info>(
     wsol_mint: &Account<'info, Mint>,
     bump_wsol_ta_express_relay: u8,
 ) -> Result<()> {
-    msg!("GOT TO HANDLE WSOL 1");
     let permission_data = permission.load()?;
-    msg!("GOT TO HANDLE WSOL 2");
     let bid_amount = permission_data.bid_amount;
     drop(permission_data);
-    msg!("bid amount {:p}", &bid_amount);
 
-    msg!("GOT TO HANDLE WSOL 3");
     // wrapped sol transfer
-    msg!("wsol_ta_user {:p}", wsol_ta_user);
-    msg!("wsol_ta_user cloned {:p}", &(wsol_ta_user.to_account_info().clone()));
-    msg!("wsol_ta_express_relay {:p}", wsol_ta_express_relay);
-    msg!("wsol_ta_express_relay cloned {:p}", &(wsol_ta_express_relay.to_account_info().clone()));
-    msg!("wsol_ta_express_relay acc info {:p}", &(wsol_ta_express_relay.to_account_info()));
-    msg!("express_relay_authority {:p}", express_relay_authority);
-    msg!("express_relay_authority cloned {:p}", &(express_relay_authority.to_account_info().clone()));
     let cpi_accounts_transfer = SplTransfer {
         from: wsol_ta_user.to_account_info().clone(),
         to: wsol_ta_express_relay.to_account_info().clone(),
         authority: express_relay_authority.to_account_info().clone(),
     };
-    msg!("GOT TO HANDLE WSOL 4");
     let cpi_program_transfer = token_program.to_account_info();
     token::transfer(
         CpiContext::new_with_signer(
@@ -65,7 +53,7 @@ pub fn handle_wsol_transfer<'info>(
         ),
         bid_amount
     )?;
-    msg!("GOT TO HANDLE WSOL 5");
+
     // close wsol_ta_express_relay to get the SOL
     let cpi_accounts_close = CloseAccount {
         account: wsol_ta_express_relay.to_account_info().clone(),
@@ -102,48 +90,30 @@ pub fn validate_signature(
     let valid_until = data.valid_until;
 
     let timestamp = Clock::get()?.unix_timestamp as u64;
-    msg!("DATA RN {:?}", data);
     if timestamp > valid_until {
         return err!(ExpressRelayError::SignatureExpired)
     }
 
-    msg!("DATA {:p}", &data);
-    msg!("TIMESTAMP {:p}", &timestamp);
-
-    msg!("starting to load current index");
     let index_depermission = load_current_index_checked(sysvar_ixs)?;
-    msg!("index deperm {:p}", &index_depermission);
     let ix = load_instruction_at_checked((index_depermission-1) as usize, sysvar_ixs)?;
-    msg!("made ix");
 
     let mut msg_vec = [0; 32+32+32+8+8];
-    msg!("instantiated msg_vec");
     msg_vec[..32].copy_from_slice(&protocol_key.to_bytes());
     msg_vec[32..64].copy_from_slice(&permission_id);
     msg_vec[64..96].copy_from_slice(&user_key.to_bytes());
     msg_vec[96..104].copy_from_slice(&bid_amount.to_le_bytes());
     msg_vec[104..112].copy_from_slice(&valid_until.to_le_bytes());
-    msg!("copied to msg_vec");
     let msg: &[u8] = &msg_vec;
-    msg!("msg {:?}", msg);
     let digest = hash::hash(msg);
-    msg!("protocol_key {:?}", protocol_key.to_bytes());
-    msg!("permission_id {:?}", permission_id);
-    msg!("user_key {:?}", user_key.to_bytes());
-    msg!("bid_amount {:?}", bid_amount.to_le_bytes());
-    msg!("valid_until {:?}", valid_until.to_le_bytes());
-
-    msg!("digest {:?}", digest.as_ref());
-    msg!("hashed msg");
     verify_ed25519_ix(&ix, &user_key.to_bytes(), digest.as_ref(), &data.signature)?;
-
-    msg!("Finished validation of signature");
 
     Ok(())
 }
 
 #[program]
 pub mod express_relay {
+    use anchor_lang::Discriminator;
+
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>, data: InitializeArgs) -> Result<()> {
@@ -194,6 +164,7 @@ pub mod express_relay {
         let relayer_signer = &ctx.accounts.relayer_signer;
         let permission = &ctx.accounts.permission;
         let sysvar_ixs = &ctx.accounts.sysvar_instructions;
+        let system_program = &ctx.accounts.system_program;
 
         // check that current permissioning ix is first (TODO: this may be only relevant if we are checking no relayer_signer in future ixs)
         let index_permission = load_current_index_checked(sysvar_ixs)?;
@@ -230,10 +201,44 @@ pub mod express_relay {
             return err!(ExpressRelayError::PermissioningOutOfOrder)
         }
 
-        let permission_data = &mut permission.load_init()?;
-        // permission.bump = ctx.bumps.permission;
-        permission_data.balance = permission.to_account_info().lamports();
-        permission_data.bid_amount = data.bid_amount;
+        // check that permission account matches permission in depermission instruction
+        assert_eq!(permission.key(), ix_depermission.accounts[1].pubkey, "Permission account does not match permission in depermission instruction");
+
+        // initialize permission account
+        let permission_id = &ix_depermission.data[8..40];
+        let protocol_key = &ix_depermission.accounts[3].pubkey;
+        let seeds_permission = &[SEED_PERMISSION, protocol_key.as_ref(), permission_id];
+
+        let cpi_acounts_create_account = CreateAccount {
+            from: relayer_signer.to_account_info().clone(),
+            to: permission.to_account_info().clone(),
+        };
+        let space = RESERVE_PERMISSION;
+        let lamports = Rent::default().minimum_balance(space).max(1);
+        let cpi_program = system_program.to_account_info();
+        let (_, bump_permission) = Pubkey::find_program_address(seeds_permission, ctx.program_id);
+        let seeds_permission_with_bump = &[SEED_PERMISSION, protocol_key.as_ref(), permission_id, &[bump_permission]];
+        create_account(
+            CpiContext::new_with_signer(
+                cpi_program,
+                cpi_acounts_create_account,
+                &[seeds_permission_with_bump]
+            ),
+            lamports,
+            space as u64,
+            ctx.program_id
+        )?;
+
+        // set the permission discriminator
+        let permission_acc_info = permission.to_account_info();
+        let discriminator_permission = PermissionMetadata::discriminator();
+        discriminator_permission.serialize(&mut &mut permission_acc_info.data.borrow_mut()[..8])?;
+
+        // set the permission data
+        let permission_data_bytes = &mut [0u8; 16];
+        permission_data_bytes[..8].copy_from_slice(permission.to_account_info().lamports().to_le_bytes().as_ref());
+        permission_data_bytes[8..].copy_from_slice(&data.bid_amount.to_le_bytes());
+        permission_data_bytes.serialize(&mut &mut permission_acc_info.data.borrow_mut()[8..])?;
 
         Ok(())
     }
@@ -292,7 +297,6 @@ pub mod express_relay {
 
         let rent_owed_relayer_signer = wsol_ta_express_relay.to_account_info().lamports();
 
-        msg!("CHECK 1");
         handle_wsol_transfer(
             wsol_ta_user,
             wsol_ta_express_relay,
@@ -308,7 +312,6 @@ pub mod express_relay {
         //     return err!(ExpressRelayError::BidNotMet)
         // }
 
-        msg!("CHECK 2");
         let split_protocol: u64;
         let protocol_config_account_info = protocol_config.to_account_info();
         if protocol_config_account_info.data_len() > 0 {
@@ -327,7 +330,6 @@ pub mod express_relay {
         if fee_relayer.checked_add(fee_protocol).unwrap() > bid_amount {
             return err!(ExpressRelayError::FeesTooHigh);
         }
-        msg!("CHECK 3");
 
         transfer_lamports(&permission.to_account_info(), &relayer_signer.to_account_info(), rent_owed_relayer_signer)?;
         transfer_lamports(&permission.to_account_info(), &protocol_fee_receiver.to_account_info(), fee_protocol)?;
@@ -416,7 +418,6 @@ pub struct SetProtocolSplit<'info> {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Copy, Debug)]
 pub struct PermissionArgs {
-    pub permission_id: [u8; 32],
     // TODO: maybe add bid_id back? depending on size constraints
     // pub bid_id: [u8; 16],
     pub bid_amount: u64,
@@ -427,18 +428,9 @@ pub struct PermissionArgs {
 pub struct Permission<'info> {
     #[account(mut)]
     pub relayer_signer: Signer<'info>,
-    #[account(
-        init,
-        payer = relayer_signer,
-        space = RESERVE_PERMISSION,
-        seeds = [SEED_PERMISSION, protocol.key().as_ref(), &data.permission_id],
-        bump
-    )]
-    pub permission: AccountLoader<'info, PermissionMetadata>,
-    /// CHECK: this is just the protocol fee receiver PK
-    pub protocol: UncheckedAccount<'info>,
-    #[account(seeds = [SEED_METADATA], bump, has_one = relayer_signer)]
-    pub express_relay_metadata: AccountLoader<'info, ExpressRelayMetadata>,
+    /// CHECK: permission is initialized and validated manually within the program
+    #[account(mut)]
+    pub permission: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     // TODO: https://github.com/solana-labs/solana/issues/22911
     /// CHECK: this is the sysvar instructions account

@@ -84,7 +84,10 @@ describe("express_relay", () => {
   );
   // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
 
-  const protocolLiquidate: string = "kamino"; // 'ezlend'
+  // tx config
+  const protocolLiquidate: string = "ezlend"; // 'ezlend'
+  const omitOpportunityAdapter: boolean = true;
+  const omitOpportunityAdapterSigVerify: boolean = true;
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -668,42 +671,52 @@ describe("express_relay", () => {
       expressRelay.programId
     );
 
+    let collateralAtaPayer;
+    let debtAtaPayer;
+    let liquidatorEzLend;
+    if (omitOpportunityAdapter) {
+      liquidatorEzLend = payer;
+      collateralAtaPayer = ataCollateralPayer.address;
+      debtAtaPayer = ataDebtPayer.address;
+    } else {
+      liquidatorEzLend = relayerSigner;
+      collateralAtaPayer = ataCollateralRelayer;
+      debtAtaPayer = ataDebtRelayer;
+    }
+
     const ixLiquidate = await ezLend.methods
       .liquidate({
         vaultId: vault_id_bytes,
       })
       .accounts({
         vault: vault[0],
-        payer: relayerSigner.publicKey,
+        payer: liquidatorEzLend.publicKey,
         // payer: payer.publicKey,
         collateralMint: mintCollateral.publicKey,
         debtMint: mintDebt.publicKey,
-        collateralAtaPayer: ataCollateralRelayer,
+        collateralAtaPayer: collateralAtaPayer,
         // collateralAtaPayer: ataCollateralPayer.address,
         collateralTaProgram: taCollateralProtocol[0],
-        debtAtaPayer: ataDebtRelayer,
+        debtAtaPayer: debtAtaPayer,
         // debtAtaPayer: ataDebtPayer.address,
         debtTaProgram: taDebtProtocol[0],
         permission: permission[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
-      .signers([relayerSigner])
+      .signers([liquidatorEzLend])
       .instruction();
 
     let bidId: Uint8Array = new Uint8Array(16);
     let bidAmount = new anchor.BN(100_000_000);
     const ixPermission = await expressRelay.methods
       .permission({
-        permissionId: vault_id_bytes,
         // bidId: bidId,
         bidAmount: bidAmount,
       })
       .accounts({
         relayerSigner: relayerSigner.publicKey,
         permission: permission[0],
-        protocol: protocol,
-        expressRelayMetadata: expressRelayMetadata[0],
         systemProgram: anchor.web3.SystemProgram.programId,
         sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
       })
@@ -919,11 +932,14 @@ describe("express_relay", () => {
       );
     let indexCheckTokenBalances;
     if (protocolLiquidate == "ezlend") {
-      indexCheckTokenBalances = 3;
+      indexCheckTokenBalances = 4;
     } else if (protocolLiquidate == "kamino") {
-      indexCheckTokenBalances = 17;
+      indexCheckTokenBalances = 18;
     } else if (protocolLiquidate == "none") {
-      indexCheckTokenBalances = 2;
+      indexCheckTokenBalances = 3;
+    }
+    if (omitOpportunityAdapter) {
+      indexCheckTokenBalances -= 1;
     }
     const ixInitializeTokenExpectations = await opportunityAdapter.methods
       .initializeTokenExpectations({
@@ -1006,7 +1022,9 @@ describe("express_relay", () => {
     let transaction = new anchor.web3.Transaction();
 
     transaction.add(ixPermission); // 48, 40 + 8
-    transaction.add(ixInitializeTokenExpectations); // 56, variable (98 w 1 buy/1 sell) + 8
+    if (!omitOpportunityAdapter) {
+      transaction.add(ixInitializeTokenExpectations); // 56, variable (98 w 1 buy/1 sell) + 8
+    }
 
     if (protocolLiquidate == "ezlend") {
       // ez lend
@@ -1019,14 +1037,19 @@ describe("express_relay", () => {
       throw new Error("Invalid protocol liquidation");
     }
 
-    // transaction.add(ixSigVerifyOpportunityAdapter); // 0, 136 + 8
-    if (transaction.instructions.length != indexCheckTokenBalances) {
-      console.log("txs length here is ", transaction.instructions.length);
-      throw new Error(
-        "Need to match the check token balances ix with the prespecified index"
-      );
+    if (!omitOpportunityAdapter) {
+      if (omitOpportunityAdapterSigVerify) {
+        transaction.add(ixSigVerifyOpportunityAdapter); // 0, 136 + 8
+      }
+      if (transaction.instructions.length != indexCheckTokenBalances) {
+        console.log("txs length here is ", transaction.instructions.length);
+        throw new Error(
+          "Need to match the check token balances ix with the prespecified index"
+        );
+      }
+      transaction.add(ixCheckTokenBalances); // 40, 0 + 8
     }
-    transaction.add(ixCheckTokenBalances); // 40, 0 + 8
+
     transaction.add(ixSigVerifyExpressRelay); // 0, 136 + 8
     transaction.add(ixDepermission); // 120, 104 + 8
 
@@ -1145,7 +1168,11 @@ describe("express_relay", () => {
     console.log("LENGTH OF versioned msg: ", messageV0.serialize().length);
 
     // sign the v0 transaction
-    transactionV0.sign([relayerSigner]);
+    if (liquidatorEzLend != relayerSigner && protocolLiquidate == "ezlend") {
+      transactionV0.sign([relayerSigner, liquidatorEzLend]);
+    } else {
+      transactionV0.sign([relayerSigner]);
+    }
 
     console.log("LENGTH OF versioned tx: ", transactionV0.serialize().length);
 

@@ -155,7 +155,7 @@ pub async fn express_relay_tx(
 
     let permission = Pubkey::find_program_address(&[SEED_PERMISSION, &protocol.to_bytes(), &permission_id], &express_relay::id()).0;
 
-    let valid_until: u64 = 69_420_000_000_000;
+    let valid_until: u64 = 20_000_000_000_000;
     let mut msg: [u8; 112] = [0; 32+32+32+8+8];
     msg[..32].copy_from_slice(&protocol.key().to_bytes());
     msg[32..64].copy_from_slice(&permission_id);
@@ -179,7 +179,6 @@ pub async fn express_relay_tx(
             data:
                 Box::new(
                     PermissionArgs {
-                        permission_id: permission_id.clone(),
                         // bid_id: bid_id.clone(),
                         bid_amount: bid_amount.clone(),
                     }
@@ -188,8 +187,6 @@ pub async fn express_relay_tx(
         accounts: Permission {
             relayer_signer: relayer_signer.pubkey(),
             permission: permission,
-            protocol: protocol,
-            express_relay_metadata: express_relay_metadata,
             system_program: system_program::ID,
             sysvar_instructions: sysvar_instructions_id(),
         }
@@ -248,17 +245,6 @@ pub async fn express_relay_tx(
             .await
             .unwrap();
     }
-
-    print!("permission id before the ix: {:?}", permission_id);
-    print!("valid until before the ix: {:?}", valid_until);
-    print!("signature before the ix: {:?}", signature);
-    print!("DOING THIS {:?}", express_relay::instruction::Depermission {
-        data: Box::new(DepermissionArgs {
-            permission_id,
-            valid_until,
-            signature
-        })
-    }.data());
 
     let depermission_ix = Instruction {
         program_id: express_relay::id(),
