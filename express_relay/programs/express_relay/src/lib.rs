@@ -3,17 +3,16 @@ pub mod state;
 pub mod utils;
 
 use anchor_lang::{prelude::*, system_program::{System, create_account, CreateAccount}};
-use anchor_lang::solana_program::sysvar::instructions as tx_instructions;
+use anchor_lang::{AccountsClose, solana_program::sysvar::instructions as tx_instructions};
 use solana_program::{hash, clock::Clock, serialize_utils::read_u16, sysvar::instructions::{load_current_index_checked, load_instruction_at_checked}};
 use anchor_syn::codegen::program::common::sighash;
-use anchor_spl::token::{self, TokenAccount, Token, Mint, Transfer as SplTransfer, CloseAccount};
+use anchor_spl::token::{self, TokenAccount, Token, Mint, Transfer as SplTransfer, CloseAccount, ID as SPL_TOKEN_PROGRAM_ID};
+use anchor_spl::associated_token::{Create, create, ID as SPL_ASSOCIATED_TOKEN_ACCOUNT_ID};
 use crate::{
     error::ExpressRelayError,
     state::*,
     utils::*,
 };
-use opportunity_adapter::ID as OPPORTUNITY_ADAPTER_PROGRAM_ID;
-use core::time;
 use std::str::FromStr;
 
 declare_id!("AJ9QckBqWJdz5RAxpMi2P83q6R7y5xZ2yFxCAYr3bg3N");
@@ -22,7 +21,7 @@ declare_id!("AJ9QckBqWJdz5RAxpMi2P83q6R7y5xZ2yFxCAYr3bg3N");
 pub fn handle_wsol_transfer<'info>(
     wsol_ta_user: &Account<'info, TokenAccount>,
     wsol_ta_express_relay: &Account<'info, TokenAccount>,
-    express_relay_authority: &AccountLoader<'info, Authority>,
+    express_relay_authority: &UncheckedAccount<'info>,
     token_program: &Program<'info, Token>,
     bump_express_relay_authority: u8,
     permission: &AccountLoader<'info, PermissionMetadata>,
@@ -81,11 +80,12 @@ pub fn handle_wsol_transfer<'info>(
 #[inline(never)]
 pub fn validate_signature(
     sysvar_ixs: &UncheckedAccount,
-    bid_amount: u64,
-    data: Box<DepermissionArgs>,
+    data: Box<PermissionArgs>,
     protocol_key: Pubkey,
     user_key: Pubkey,
+    opportunity_adapter_args: Option<OpportunityAdapterArgsWithMints>,
 ) -> Result<()> {
+    let bid_amount = data.bid_amount;
     let permission_id = data.permission_id;
     let valid_until = data.valid_until;
 
@@ -94,15 +94,39 @@ pub fn validate_signature(
         return err!(ExpressRelayError::SignatureExpired)
     }
 
-    let index_depermission = load_current_index_checked(sysvar_ixs)?;
-    let ix = load_instruction_at_checked((index_depermission-1) as usize, sysvar_ixs)?;
+    let index_permission = load_current_index_checked(sysvar_ixs)?;
+    let ix = load_instruction_at_checked((index_permission+1) as usize, sysvar_ixs)?;
 
-    let mut msg_vec = [0; 32+32+32+8+8];
-    msg_vec[..32].copy_from_slice(&protocol_key.to_bytes());
-    msg_vec[32..64].copy_from_slice(&permission_id);
-    msg_vec[64..96].copy_from_slice(&user_key.to_bytes());
-    msg_vec[96..104].copy_from_slice(&bid_amount.to_le_bytes());
-    msg_vec[104..112].copy_from_slice(&valid_until.to_le_bytes());
+    let mut msg_vec = Vec::new();
+
+    msg_vec.extend_from_slice(&protocol_key.to_bytes());
+    msg_vec.extend_from_slice(&permission_id);
+    msg_vec.extend_from_slice(&user_key.to_bytes());
+    msg_vec.extend_from_slice(&bid_amount.to_le_bytes());
+    msg_vec.extend_from_slice(&valid_until.to_le_bytes());
+
+    match opportunity_adapter_args {
+        Some(args) => {
+            let buy_tokens = args.buy_token_amounts;
+            let sell_tokens = args.sell_token_amounts;
+
+            let n_buy_tokens = buy_tokens.len() as u8;
+            let n_sell_tokens = sell_tokens.len() as u8;
+
+            msg_vec.push(n_buy_tokens);
+            msg_vec.push(n_sell_tokens);
+            for buy_token in buy_tokens.iter() {
+                msg_vec.extend_from_slice(&buy_token.mint.to_bytes());
+                msg_vec.extend_from_slice(&buy_token.amount.to_le_bytes());
+            }
+            for sell_token in sell_tokens.iter() {
+                msg_vec.extend_from_slice(&sell_token.mint.to_bytes());
+                msg_vec.extend_from_slice(&sell_token.amount.to_le_bytes());
+            }
+        }
+
+        None => {}
+    }
     let msg: &[u8] = &msg_vec;
     let digest = hash::hash(msg);
     verify_ed25519_ix(&ix, &user_key.to_bytes(), digest.as_ref(), &data.signature)?;
@@ -160,9 +184,10 @@ pub mod express_relay {
         Ok(())
     }
 
-    pub fn permission(ctx: Context<Permission>, data: Box<PermissionArgs>) -> Result<()> {
+    pub fn permission<'info>(ctx: Context<'_, '_, '_, 'info, Permission<'info>>, data: Box<PermissionArgs>) -> Result<()> {
         let relayer_signer = &ctx.accounts.relayer_signer;
         let permission = &ctx.accounts.permission;
+        let protocol = &ctx.accounts.protocol;
         let sysvar_ixs = &ctx.accounts.sysvar_instructions;
         let system_program = &ctx.accounts.system_program;
 
@@ -204,87 +229,221 @@ pub mod express_relay {
         // check that permission account matches permission in depermission instruction
         assert_eq!(permission.key(), ix_depermission.accounts[1].pubkey, "Permission account does not match permission in depermission instruction");
 
-        // initialize permission account
-        let permission_id = &ix_depermission.data[8..40];
-        let protocol_key = &ix_depermission.accounts[3].pubkey;
-        let seeds_permission = &[SEED_PERMISSION, protocol_key.as_ref(), permission_id];
+        let permission_data = &mut permission.load_init()?;
+        permission_data.balance = permission.to_account_info().lamports();
+        permission_data.bid_amount = data.bid_amount;
 
-        let cpi_acounts_create_account = CreateAccount {
-            from: relayer_signer.to_account_info().clone(),
-            to: permission.to_account_info().clone(),
-        };
-        let space = RESERVE_PERMISSION;
-        let lamports = Rent::default().minimum_balance(space).max(1);
-        let cpi_program = system_program.to_account_info();
-        let (_, bump_permission) = Pubkey::find_program_address(seeds_permission, ctx.program_id);
-        let seeds_permission_with_bump = &[SEED_PERMISSION, protocol_key.as_ref(), permission_id, &[bump_permission]];
-        create_account(
-            CpiContext::new_with_signer(
-                cpi_program,
-                cpi_acounts_create_account,
-                &[seeds_permission_with_bump]
-            ),
-            lamports,
-            space as u64,
-            ctx.program_id
-        )?;
+        let opportunity_adapter_args;
 
-        // set the permission discriminator
-        let permission_acc_info = permission.to_account_info();
-        let discriminator_permission = PermissionMetadata::discriminator();
-        discriminator_permission.serialize(&mut &mut permission_acc_info.data.borrow_mut()[..8])?;
+        match data.clone().opportunity_adapter_args {
+            Some(args) => {
+                permission_data.opportunity_adapter = 1;
 
-        // set the permission data
-        let permission_data_bytes = &mut [0u8; 16];
-        permission_data_bytes[..8].copy_from_slice(permission.to_account_info().lamports().to_le_bytes().as_ref());
-        permission_data_bytes[8..].copy_from_slice(&data.bid_amount.to_le_bytes());
-        permission_data_bytes.serialize(&mut &mut permission_acc_info.data.borrow_mut()[8..])?;
+                let user = &ctx.remaining_accounts[0];
+                let express_relay_authority = &ctx.remaining_accounts[1];
+                let token_program = &ctx.remaining_accounts[2];
+                let associated_token_program = &ctx.remaining_accounts[3];
+
+                // validate express_relay_authority
+                let (pda_express_relay_authority, bump_express_relay_authority) = Pubkey::find_program_address(&[SEED_AUTHORITY], ctx.program_id);
+                assert_eq!(pda_express_relay_authority, express_relay_authority.key());
+
+                // validate the token_program
+                assert_eq!(token_program.key(), SPL_TOKEN_PROGRAM_ID);
+
+                // validate the associated_token_program
+                assert_eq!(associated_token_program.key(), SPL_ASSOCIATED_TOKEN_ACCOUNT_ID);
+
+                let remaining_accounts = &ctx.remaining_accounts[4..].iter().map(|acc| acc.to_account_info()).collect::<Vec<_>>();
+
+                let sell_tokens = args.sell_tokens;
+                let buy_tokens = args.buy_tokens;
+                let mut sell_token_amounts: Vec<TokenAmount> = sell_tokens.iter().map(|x| TokenAmount { mint: Pubkey::default(), amount: *x }).collect();
+                let mut buy_token_amounts: Vec<TokenAmount> = buy_tokens.iter().map(|x| TokenAmount { mint: Pubkey::default(), amount: *x }).collect();
+
+                let n_sell_tokens = sell_tokens.len();
+                let expected_changes: Vec<u64> = sell_tokens.iter().chain(buy_tokens.iter()).map(|x| *x).collect();
+                assert_eq!(expected_changes.len() * 4, remaining_accounts.len());
+
+                // TODO: make this offset determination programmatic in the future
+                let offset_accounts_check_token_balances: usize = 15;
+                assert_eq!(remaining_accounts.len() + offset_accounts_check_token_balances, ix_depermission.accounts.len());
+
+                for (i, expected_change) in expected_changes.iter().enumerate() {
+                    let mint_acc = &remaining_accounts[i*4];
+                    let ta_user_acc = &remaining_accounts[i * 4 + 1];
+                    let token_expectation_acc = &remaining_accounts[i * 4 + 2];
+                    let ta_relayer_acc = &remaining_accounts[i * 4 + 3];
+
+                    // validate the ta_user_acc and the mint acc
+                    let mut mint_buf = &mint_acc.try_borrow_data()?[..];
+                    let _mint_data = Mint::try_deserialize(&mut mint_buf)?;
+                    let ta_user_data = TokenAccount::try_deserialize(&mut &ta_user_acc.try_borrow_data()?[..])?;
+                    assert_eq!(ta_user_data.mint, mint_acc.key());
+                    assert_eq!(ta_user_data.owner, user.key());
+
+                    // validate the ta_relayer_acc is the ata of the relayer
+                    let (ata_relayer_key, _) = Pubkey::find_program_address(
+                        &[
+                            &relayer_signer.key.to_bytes(),
+                            &token_program.key.to_bytes(),
+                            &mint_acc.key.to_bytes(),
+                        ],
+                        associated_token_program.key
+                    );
+                    assert_eq!(ata_relayer_key, ta_relayer_acc.key());
+
+                    // check if the relayer token account data exists, if not create it and initialize it
+                    if ta_relayer_acc.lamports() == 0 {
+                        // create the token_expectation_acc
+                        let cpi_accounts_create_token_account = Create {
+                            payer: relayer_signer.to_account_info().clone(),
+                            associated_token: ta_relayer_acc.clone(),
+                            authority: relayer_signer.to_account_info().clone(),
+                            mint: mint_acc.clone(),
+                            system_program: system_program.to_account_info().clone(),
+                            token_program: token_program.to_account_info().clone(),
+                        };
+                        let cpi_program = associated_token_program.to_account_info();
+                        create(
+                            CpiContext::new(
+                                cpi_program,
+                                cpi_accounts_create_token_account
+                            )
+                        )?;
+                    }
+
+                    // validate the ta_relayer_acc
+                    let ta_relayer_data = TokenAccount::try_deserialize(&mut &ta_relayer_acc.try_borrow_data()?[..])?;
+                    assert_eq!(ta_relayer_data.mint, mint_acc.key());
+                    assert_eq!(ta_relayer_data.owner, relayer_signer.key());
+
+                    // validate the address of the token_expectation_acc
+                    let (pda_token_expectation, bump_token_expectation) = Pubkey::find_program_address(&[SEED_TOKEN_EXPECTATION, user.key().as_ref(), mint_acc.key().as_ref()], ctx.program_id);
+                    assert_eq!(pda_token_expectation, token_expectation_acc.key());
+                    assert_eq!(token_expectation_acc.lamports(), 0);
+
+                    let discriminator_token_expectation = TokenExpectation::discriminator();
+
+                    if token_expectation_acc.lamports() == 0 {
+                        // create the token_expectation_acc
+                        let cpi_acounts_create_account = CreateAccount {
+                            from: relayer_signer.to_account_info().clone(),
+                            to: token_expectation_acc.clone(),
+                        };
+                        let space = RESERVE_TOKEN_EXPECTATION;
+                        let lamports = Rent::default().minimum_balance(space).max(1);
+                        let cpi_program = system_program.to_account_info();
+                        create_account(
+                            CpiContext::new_with_signer(
+                                cpi_program,
+                                cpi_acounts_create_account,
+                                &[
+                                    &[
+                                        SEED_TOKEN_EXPECTATION,
+                                        user.key().as_ref(),
+                                        mint_acc.key().as_ref(),
+                                        &[bump_token_expectation]
+                                    ]
+                                ]
+                            ),
+                            lamports,
+                            space as u64,
+                            ctx.program_id
+                        )?;
+
+                        // initialize the token_expectation_acc discriminator
+                        discriminator_token_expectation.serialize(&mut &mut token_expectation_acc.data.borrow_mut()[..8])?;
+                    }
+
+                    // check that the accounts in the later instruction match the accounts specified in this instruction
+                    let mint_acc_check_token_balances = &ix_depermission.accounts[offset_accounts_check_token_balances + i * 4];
+                    assert_eq!(mint_acc_check_token_balances.pubkey, mint_acc.key());
+                    let ta_user_acc_check_token_balances = &ix_depermission.accounts[offset_accounts_check_token_balances + i * 4 + 1];
+                    assert_eq!(ta_user_acc_check_token_balances.pubkey, ta_user_acc.key());
+                    let token_expectation_acc_check_token_balances = &ix_depermission.accounts[offset_accounts_check_token_balances + i * 4 + 2];
+                    assert_eq!(token_expectation_acc_check_token_balances.pubkey, token_expectation_acc.key());
+                    let ta_relayer_acc_check_token_balances = &ix_depermission.accounts[offset_accounts_check_token_balances + i * 4 + 3];
+                    assert_eq!(ta_relayer_acc_check_token_balances.pubkey, ta_relayer_acc.key());
+
+                    let token_expectation_data = &mut TokenExpectation::try_deserialize(&mut &token_expectation_acc.try_borrow_mut_data()?[..])?;
+
+                    let tokens = ta_user_data.amount;
+                    if i < n_sell_tokens {
+                        sell_token_amounts[i].mint = mint_acc.key();
+
+                        // transfer tokens to the relayer ata
+                        let cpi_accounts = SplTransfer {
+                            from: ta_user_acc.clone(),
+                            to: ta_relayer_acc.clone(),
+                            authority: express_relay_authority.to_account_info().clone(),
+                        };
+                        let cpi_program = token_program.to_account_info();
+                        token::transfer(
+                            CpiContext::new_with_signer(
+                                cpi_program,
+                                cpi_accounts,
+                                &[
+                                    &[
+                                        SEED_AUTHORITY,
+                                        &[bump_express_relay_authority]
+                                    ]
+                                ]),
+                            tokens
+                        )?;
+
+                        token_expectation_data.balance_post_expected = token_expectation_data.balance_post_expected.checked_add(tokens).unwrap();
+
+                        token_expectation_data.balance_post_expected = token_expectation_data.balance_post_expected.checked_sub(*expected_change).unwrap();
+                        token_expectation_data.sell_token = true;
+                    } else {
+                        buy_token_amounts[i - n_sell_tokens].mint = mint_acc.key();
+
+                        token_expectation_data.balance_post_expected = token_expectation_data.balance_post_expected.checked_add(*expected_change).unwrap();
+                        token_expectation_data.sell_token = false;
+                    }
+
+                    let token_expectation_data_with_discriminator = (discriminator_token_expectation, token_expectation_data.clone());
+                    token_expectation_data_with_discriminator.serialize(&mut *token_expectation_acc.data.borrow_mut())?;
+                }
+
+                opportunity_adapter_args = Some(OpportunityAdapterArgsWithMints {
+                    sell_token_amounts,
+                    buy_token_amounts,
+                })
+            }
+
+            None => {
+                opportunity_adapter_args = None;
+            }
+        }
+
+        let user_key = ix_depermission.accounts[2].pubkey;
+
+        validate_signature(sysvar_ixs, data, protocol.key(), user_key, opportunity_adapter_args)?;
 
         Ok(())
     }
 
-    pub fn depermission(ctx: Context<Depermission>, data: Box<DepermissionArgs>) -> Result<()> {
-        let check_space = [0u8; 1000];
-        msg!("check_space {:p}", &check_space);
-
+    pub fn depermission<'info>(ctx: Context<'_, '_, 'info, 'info, Depermission<'info>>) -> Result<()> {
         let relayer_signer = &ctx.accounts.relayer_signer;
         msg!("relayer signer {:p}", relayer_signer);
         let permission = &ctx.accounts.permission;
-        msg!("permission {:p}", permission);
         let protocol_config = &ctx.accounts.protocol_config;
-        msg!("protocol_config {:p}", protocol_config);
         let express_relay_metadata = &ctx.accounts.express_relay_metadata;
-        msg!("express_relay_metadata {:p}", express_relay_metadata);
         let protocol_fee_receiver = &ctx.accounts.protocol_fee_receiver;
-        msg!("protocol_fee_receiver {:p}", protocol_fee_receiver);
         let relayer_fee_receiver = &ctx.accounts.relayer_fee_receiver;
-        msg!("relayer_fee_receiver {:p}", relayer_fee_receiver);
 
         let wsol_mint = &ctx.accounts.wsol_mint;
-        msg!("wsol_mint {:p}", wsol_mint);
         let wsol_ta_user = &ctx.accounts.wsol_ta_user;
-        msg!("wsol_ta_user {:p}", wsol_ta_user);
         let wsol_ta_express_relay = &ctx.accounts.wsol_ta_express_relay;
-        msg!("wsol_ta_express_relay {:p}", wsol_ta_express_relay);
         let express_relay_authority = &ctx.accounts.express_relay_authority;
-        msg!("express_relay_authority {:p}", express_relay_authority);
-        let signature_accounting = &ctx.accounts.signature_accounting;
         let token_program = &ctx.accounts.token_program;
-        msg!("token_program {:p}", token_program);
         let sysvar_ixs = &ctx.accounts.sysvar_instructions;
-        msg!("sysvar_ixs {:p}", sysvar_ixs);
-
-        let j: u8 = 0;
-        msg!("j! {:p}", &j);
-        let j2: u8 = 1;
-        msg!("j2! {:p}", &j2);
-
-        msg!("ix data {:p}", &data);
-        msg!("ctx {:p}", &ctx);
 
         let permission_data = permission.load()?;
-        msg!("permission data {:p}", &permission_data);
         let bid_amount = permission_data.bid_amount;
+        let opportunity_adapter = permission_data.opportunity_adapter;
         drop(permission_data);
 
         let express_relay_metadata_data = express_relay_metadata.load()?;
@@ -292,8 +451,48 @@ pub mod express_relay {
         let split_relayer = express_relay_metadata_data.split_relayer;
         drop(express_relay_metadata_data);
 
-        // signature verification
-        validate_signature(sysvar_ixs, bid_amount, data, ctx.accounts.protocol.key(), ctx.accounts.user.key())?;
+        if opportunity_adapter != 0 {
+            let remaining_accounts = ctx.remaining_accounts;
+
+            let mut token_expectation_accs = vec![];
+
+            for i in 0..remaining_accounts.len()/4 {
+                // TODO: if we aren't doing revalidation, do we need the mint?
+                let _mint_acc = &remaining_accounts[i * 4];
+                let ta_user_acc = &remaining_accounts[i * 4 + 1];
+                let token_expectation_acc = &remaining_accounts[i * 4 + 2];
+                let ta_relayer_acc = &remaining_accounts[i * 4 + 3];
+
+                let ta_relayer_data = TokenAccount::try_deserialize(&mut &ta_relayer_acc.try_borrow_data()?[..])?;
+                let token_expectation_data = TokenExpectation::try_deserialize(&mut &token_expectation_acc.try_borrow_data()?[..])?;
+
+                // TODO: do we need to really do revalidation here...? conceivable in theory someone uses this ix without the initialization ix, but really?
+
+                if token_expectation_data.balance_post_expected > ta_relayer_data.amount {
+                    return err!(ExpressRelayError::TokenExpectationNotMet);
+                }
+
+                let cpi_accounts = SplTransfer {
+                    from: ta_relayer_acc.clone(),
+                    to: ta_user_acc.clone(),
+                    authority: relayer_signer.to_account_info().clone(),
+                };
+                // TODO: how to handle this if relayer_signer were to receive SPL tokens? this shouldn't happen usually, but could (e.g. airdrops, mistaken sends, etc.)
+                let tokens = token_expectation_data.balance_post_expected;
+                let cpi_program = token_program.to_account_info();
+                token::transfer(
+                    CpiContext::new(cpi_program, cpi_accounts),
+                    tokens
+                )?;
+
+                token_expectation_accs.push(token_expectation_acc);
+            }
+
+            for token_expectation_acc in token_expectation_accs.iter() {
+                let token_expectation_acc_to_close: Account<TokenExpectation> = Account::try_from(token_expectation_acc)?;
+                let _ = token_expectation_acc_to_close.close(relayer_signer.to_account_info());
+            }
+        }
 
         let rent_owed_relayer_signer = wsol_ta_express_relay.to_account_info().lamports();
 
@@ -416,11 +615,21 @@ pub struct SetProtocolSplit<'info> {
     pub system_program: Program<'info, System>,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Debug)]
 pub struct PermissionArgs {
     // TODO: maybe add bid_id back? depending on size constraints
     // pub bid_id: [u8; 16],
+    pub permission_id: [u8; 32],
+    pub signature: [u8; 64],
+    pub valid_until: u64,
     pub bid_amount: u64,
+    pub opportunity_adapter_args: Option<OpportunityAdapterArgs>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Debug)]
+pub struct OpportunityAdapterArgs {
+    pub sell_tokens: Vec<u64>,
+    pub buy_tokens: Vec<u64>,
 }
 
 #[derive(Accounts)]
@@ -428,9 +637,18 @@ pub struct PermissionArgs {
 pub struct Permission<'info> {
     #[account(mut)]
     pub relayer_signer: Signer<'info>,
-    /// CHECK: permission is initialized and validated manually within the program
-    #[account(mut)]
-    pub permission: UncheckedAccount<'info>,
+    #[account(
+        init,
+        payer = relayer_signer,
+        space = RESERVE_PERMISSION,
+        seeds = [SEED_PERMISSION, protocol.key().as_ref(), &data.permission_id],
+        bump,
+    )]
+    pub permission: AccountLoader<'info, PermissionMetadata>,
+    /// CHECK: this is just the protocol program address
+    pub protocol: UncheckedAccount<'info>,
+    #[account(init, payer = relayer_signer, space = RESERVE_SIGNATURE_ACCOUNTING, seeds = [SEED_SIGNATURE_ACCOUNTING, &data.signature[..32], &data.signature[32..]], bump)]
+    pub signature_accounting: AccountLoader<'info, SignatureAccounting>,
     pub system_program: Program<'info, System>,
     // TODO: https://github.com/solana-labs/solana/issues/22911
     /// CHECK: this is the sysvar instructions account
@@ -438,24 +656,13 @@ pub struct Permission<'info> {
     pub sysvar_instructions: UncheckedAccount<'info>,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Copy, Debug)]
-pub struct DepermissionArgs {
-    pub permission_id: [u8; 32],
-    pub signature: [u8; 64],
-    pub valid_until: u64,
-}
-
 #[derive(Accounts)]
-#[instruction(data: Box<DepermissionArgs>)]
 pub struct Depermission<'info> {
     #[account(mut)]
     pub relayer_signer: Signer<'info>,
     // TODO: upon close, should send funds to the program as opposed to the relayer signer--o/w relayer will get all "fat-fingered" fees
-    #[account(
-        mut,
-        seeds = [SEED_PERMISSION, protocol.key().as_ref(), &data.permission_id],
-        bump,
-        close = relayer_signer)]
+    /// CHECK: permission is correctly seeded, closed within the program
+    #[account(mut, close = relayer_signer)]
     pub permission: AccountLoader<'info, PermissionMetadata>,
     /// CHECK: this is just the user account
     pub user: UncheckedAccount<'info>,
@@ -490,10 +697,9 @@ pub struct Depermission<'info> {
         token::authority = wsol_ta_express_relay
     )]
     pub wsol_ta_express_relay: Box<Account<'info, TokenAccount>>,
-    #[account(init_if_needed, payer = relayer_signer, space = RESERVE_AUTHORITY, seeds = [SEED_AUTHORITY], bump)]
-    pub express_relay_authority: AccountLoader<'info, Authority>,
-    #[account(init, payer = relayer_signer, space = RESERVE_SIGNATURE_ACCOUNTING, seeds = [SEED_SIGNATURE_ACCOUNTING, &data.signature[..32], &data.signature[32..]], bump)]
-    pub signature_accounting: AccountLoader<'info, SignatureAccounting>,
+    /// CHECK: This is an empty PDA, just used for signing
+    #[account(seeds = [SEED_AUTHORITY], bump)]
+    pub express_relay_authority: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     /// CHECK: this is the sysvar instructions account

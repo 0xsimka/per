@@ -3,7 +3,6 @@ import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { ExpressRelay } from "../target/types/express_relay";
 import { EzLend } from "../target/types/ez_lend";
-import { OpportunityAdapter } from "../target/types/opportunity_adapter";
 import {
   Token,
   TOKEN_PROGRAM_ID,
@@ -77,8 +76,6 @@ describe("express_relay", () => {
 
   const expressRelay = anchor.workspace.ExpressRelay as Program<ExpressRelay>;
   const ezLend = anchor.workspace.EzLend as Program<EzLend>;
-  const opportunityAdapter = anchor.workspace
-    .OpportunityAdapter as Program<OpportunityAdapter>;
   const klendProgramId = new PublicKey(
     "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
   );
@@ -86,8 +83,7 @@ describe("express_relay", () => {
 
   // tx config
   const protocolLiquidate: string = "ezlend"; // 'ezlend'
-  const omitOpportunityAdapter: boolean = true;
-  const omitOpportunityAdapterSigVerify: boolean = true;
+  const omitOpportunityAdapter: boolean = false;
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -108,7 +104,6 @@ describe("express_relay", () => {
   let taDebtProtocol;
 
   let expressRelayAuthority;
-  let opportunityAdapterAuthority;
 
   let protocol = ezLend.programId;
   let protocolFeeReceiver;
@@ -252,10 +247,6 @@ describe("express_relay", () => {
     expressRelayAuthority = await PublicKey.findProgramAddressSync(
       [anchor.utils.bytes.utf8.encode("authority")],
       expressRelay.programId
-    );
-    opportunityAdapterAuthority = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("authority")],
-      opportunityAdapter.programId
     );
 
     const tokenWsol = new Token(
@@ -405,10 +396,10 @@ describe("express_relay", () => {
     //   TOKEN_PROGRAM_ID
     // );
 
-    // approve user's tokens to opportunity adapter
+    // approve user's tokens to express relay
     await tokenCollateral.approve(
       ataCollateralPayer.address,
-      opportunityAdapterAuthority[0],
+      expressRelayAuthority[0],
       payer,
       [],
       1000
@@ -417,13 +408,13 @@ describe("express_relay", () => {
     //   provider.connection,
     //   payer,
     //   ataCollateralPayer.address,
-    //   opportunityAdapterAuthority[0],
+    //   expressRelayAuthority[0],
     //   payer.publicKey,
     //   1000
     // );
     await tokenDebt.approve(
       ataDebtPayer.address,
-      opportunityAdapterAuthority[0],
+      expressRelayAuthority[0],
       payer,
       [],
       10000
@@ -432,7 +423,7 @@ describe("express_relay", () => {
     //   provider.connection,
     //   payer,
     //   ataDebtPayer.address,
-    //   opportunityAdapterAuthority[0],
+    //   expressRelayAuthority[0],
     //   payer.publicKey,
     //   10000
     // );
@@ -709,19 +700,6 @@ describe("express_relay", () => {
 
     let bidId: Uint8Array = new Uint8Array(16);
     let bidAmount = new anchor.BN(100_000_000);
-    const ixPermission = await expressRelay.methods
-      .permission({
-        // bidId: bidId,
-        bidAmount: bidAmount,
-      })
-      .accounts({
-        relayerSigner: relayerSigner.publicKey,
-        permission: permission[0],
-        systemProgram: anchor.web3.SystemProgram.programId,
-        sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .signers([relayerSigner])
-      .instruction();
 
     let protocolConfig = await PublicKey.findProgramAddressSync(
       [anchor.utils.bytes.utf8.encode("config_protocol"), protocol.toBuffer()],
@@ -729,6 +707,104 @@ describe("express_relay", () => {
     );
 
     const validUntilExpressRelay = new anchor.BN(200_000_000_000_000);
+
+    let tokenExpectationCollateral = await PublicKey.findProgramAddressSync(
+      [
+        anchor.utils.bytes.utf8.encode("token_expectation"),
+        payer.publicKey.toBuffer(),
+        mintCollateral.publicKey.toBuffer(),
+      ],
+      expressRelay.programId
+    );
+
+    let tokenExpectationDebt = await PublicKey.findProgramAddressSync(
+      [
+        anchor.utils.bytes.utf8.encode("token_expectation"),
+        payer.publicKey.toBuffer(),
+        mintDebt.publicKey.toBuffer(),
+      ],
+      expressRelay.programId
+    );
+
+    const buyTokens = [collateral_amount];
+    const buyMints = [mintCollateral.publicKey];
+    const sellTokens = [debt_amount];
+    const sellMints = [mintDebt.publicKey];
+
+    let opportunityAdapterArgs;
+    let remainingAccountsOpportunityAdapter;
+    if (omitOpportunityAdapter) {
+      opportunityAdapterArgs = null;
+      remainingAccountsOpportunityAdapter = [];
+    } else {
+      opportunityAdapterArgs = {
+        sellTokens: sellTokens,
+        buyTokens: buyTokens,
+      };
+      remainingAccountsOpportunityAdapter = [
+        {
+          pubkey: payer.publicKey,
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: expressRelayAuthority[0],
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: TOKEN_PROGRAM_ID,
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: ASSOCIATED_TOKEN_PROGRAM_ID,
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: mintDebt.publicKey,
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: ataDebtPayer.address,
+          isWritable: true,
+          isSigner: false,
+        },
+        {
+          pubkey: tokenExpectationDebt[0],
+          isWritable: true,
+          isSigner: false,
+        },
+        {
+          pubkey: ataDebtRelayer,
+          isWritable: true,
+          isSigner: false,
+        },
+        {
+          pubkey: mintCollateral.publicKey,
+          isWritable: false,
+          isSigner: false,
+        },
+        {
+          pubkey: ataCollateralPayer.address,
+          isWritable: true,
+          isSigner: false,
+        },
+        {
+          pubkey: tokenExpectationCollateral[0],
+          isWritable: true,
+          isSigner: false,
+        },
+        {
+          pubkey: ataCollateralRelayer,
+          isWritable: true,
+          isSigner: false,
+        },
+      ];
+    }
+
     const msgExpressRelay1 = Uint8Array.from(protocol.toBuffer());
     const msgExpressRelay2 = Uint8Array.from(vault_id_bytes);
     const msgExpressRelay3 = Uint8Array.from(payer.publicKey.toBuffer());
@@ -738,18 +814,40 @@ describe("express_relay", () => {
     const msgExpressRelay5 = Uint8Array.from(
       validUntilExpressRelay.toArrayLike(Buffer, "le", 8)
     );
-    console.log(msgExpressRelay1);
-    console.log(msgExpressRelay2);
-    console.log(msgExpressRelay3);
-    console.log(msgExpressRelay4);
-    console.log(msgExpressRelay5);
-    const msgExpressRelay = Buffer.concat([
-      msgExpressRelay1,
-      msgExpressRelay2,
-      msgExpressRelay3,
-      msgExpressRelay4,
-      msgExpressRelay5,
-    ]);
+    let msgOpportunityAdapter1 = new Uint8Array(2);
+    msgOpportunityAdapter1[0] = buyTokens.length;
+    msgOpportunityAdapter1[1] = sellTokens.length;
+    let msgOpportunityAdapter2 = new Uint8Array(40 * buyTokens.length);
+    for (let i = 0; i < buyTokens.length; i++) {
+      msgOpportunityAdapter2.set(buyMints[i].toBuffer(), i * 40);
+      msgOpportunityAdapter2.set(buyTokens[i].toBuffer(), i * 40 + 32);
+    }
+    let msgOpportunityAdapter3 = new Uint8Array(40 * sellTokens.length);
+    for (let i = 0; i < sellTokens.length; i++) {
+      msgOpportunityAdapter3.set(sellMints[i].toBuffer(), i * 40);
+      msgOpportunityAdapter3.set(sellTokens[i].toBuffer(), i * 40 + 32);
+    }
+    let msgExpressRelay;
+    if (omitOpportunityAdapter) {
+      msgExpressRelay = Buffer.concat([
+        msgExpressRelay1,
+        msgExpressRelay2,
+        msgExpressRelay3,
+        msgExpressRelay4,
+        msgExpressRelay5,
+      ]);
+    } else {
+      msgExpressRelay = Buffer.concat([
+        msgExpressRelay1,
+        msgExpressRelay2,
+        msgExpressRelay3,
+        msgExpressRelay4,
+        msgExpressRelay5,
+        msgOpportunityAdapter1,
+        msgOpportunityAdapter2,
+        msgOpportunityAdapter3,
+      ]);
+    }
     const digestExpressRelay = Buffer.from(
       await crypto.subtle.digest("SHA-256", msgExpressRelay)
     );
@@ -769,13 +867,29 @@ describe("express_relay", () => {
         expressRelay.programId
       );
 
-    const ixDepermission = await expressRelay.methods
-      .depermission({
+    const ixPermission = await expressRelay.methods
+      .permission({
         permissionId: vault_id_bytes,
-        // bidId: bidId,
         signature: signatureExpressRelay,
         validUntil: validUntilExpressRelay,
+        // bidId: bidId,
+        bidAmount: bidAmount,
+        opportunityAdapterArgs: opportunityAdapterArgs,
       })
+      .accounts({
+        relayerSigner: relayerSigner.publicKey,
+        permission: permission[0],
+        protocol: protocol,
+        signatureAccounting: signatureAccountingExpressRelay[0],
+        systemProgram: anchor.web3.SystemProgram.programId,
+        sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+      })
+      .remainingAccounts(remainingAccountsOpportunityAdapter)
+      .signers([relayerSigner])
+      .instruction();
+
+    const ixDepermission = await expressRelay.methods
+      .depermission()
       .accounts({
         relayerSigner: relayerSigner.publicKey,
         permission: permission[0],
@@ -794,6 +908,7 @@ describe("express_relay", () => {
         systemProgram: anchor.web3.SystemProgram.programId,
         sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
       })
+      .remainingAccounts(remainingAccountsOpportunityAdapter.slice(4))
       .signers([relayerSigner])
       .instruction();
 
@@ -804,227 +919,11 @@ describe("express_relay", () => {
         signature: signatureExpressRelay,
       });
 
-    console.log("DATA FOR EXPRESS RELAY SIG VER");
-    console.log(ixSigVerifyExpressRelay.data);
-    console.log(ixSigVerifyExpressRelay.data.length);
-    console.log(digestExpressRelay);
-    console.log(digestExpressRelay.length);
-    console.log(signatureExpressRelay);
-    console.log(signatureExpressRelay.length);
-    console.log(payer.publicKey.toBytes());
-    console.log(payer.publicKey.toBytes().length);
-
-    let tokenExpectationCollateral = await PublicKey.findProgramAddressSync(
-      [
-        anchor.utils.bytes.utf8.encode("token_expectation"),
-        payer.publicKey.toBuffer(),
-        mintCollateral.publicKey.toBuffer(),
-      ],
-      opportunityAdapter.programId
-    );
-
-    let tokenExpectationDebt = await PublicKey.findProgramAddressSync(
-      [
-        anchor.utils.bytes.utf8.encode("token_expectation"),
-        payer.publicKey.toBuffer(),
-        mintDebt.publicKey.toBuffer(),
-      ],
-      opportunityAdapter.programId
-    );
-
-    const remainingAccountsOpportunityAdapter = [
-      {
-        pubkey: mintDebt.publicKey,
-        isWritable: false,
-        isSigner: false,
-      },
-      {
-        pubkey: ataDebtPayer.address,
-        isWritable: true,
-        isSigner: false,
-      },
-      {
-        pubkey: tokenExpectationDebt[0],
-        isWritable: true,
-        isSigner: false,
-      },
-      {
-        pubkey: ataDebtRelayer,
-        isWritable: true,
-        isSigner: false,
-      },
-      {
-        pubkey: mintCollateral.publicKey,
-        isWritable: false,
-        isSigner: false,
-      },
-      {
-        pubkey: ataCollateralPayer.address,
-        isWritable: true,
-        isSigner: false,
-      },
-      {
-        pubkey: tokenExpectationCollateral[0],
-        isWritable: true,
-        isSigner: false,
-      },
-      {
-        pubkey: ataCollateralRelayer,
-        isWritable: true,
-        isSigner: false,
-      },
-    ];
-
-    const validUntilOpportunityAdapter = new anchor.BN(100_000_000_000_000);
-    const buyTokens = [collateral_amount];
-    const buyMints = [mintCollateral.publicKey];
-    const sellTokens = [debt_amount];
-    const sellMints = [mintDebt.publicKey];
-    let msgOpportunityAdapter1 = new Uint8Array(2);
-    msgOpportunityAdapter1[0] = buyTokens.length;
-    msgOpportunityAdapter1[1] = sellTokens.length;
-    let msgOpportunityAdapter2 = new Uint8Array(40 * buyTokens.length);
-    for (let i = 0; i < buyTokens.length; i++) {
-      msgOpportunityAdapter2.set(buyMints[i].toBuffer(), i * 40);
-      msgOpportunityAdapter2.set(buyTokens[i].toBuffer(), i * 40 + 32);
-    }
-    let msgOpportunityAdapter3 = new Uint8Array(40 * sellTokens.length);
-    for (let i = 0; i < sellTokens.length; i++) {
-      msgOpportunityAdapter3.set(sellMints[i].toBuffer(), i * 40);
-      msgOpportunityAdapter3.set(sellTokens[i].toBuffer(), i * 40 + 32);
-    }
-    const msgOpportunityAdapter4 = Uint8Array.from(payer.publicKey.toBuffer());
-    const msgOpportunityAdapter5 = Uint8Array.from(
-      validUntilOpportunityAdapter.toBuffer("le", 8)
-    );
-    const msgOpportunityAdapter = Buffer.concat([
-      msgOpportunityAdapter1,
-      msgOpportunityAdapter2,
-      msgOpportunityAdapter3,
-      msgOpportunityAdapter4,
-      msgOpportunityAdapter5,
-    ]);
-
-    let digestOpportunityAdapter = await crypto.subtle.digest(
-      "SHA-256",
-      msgOpportunityAdapter
-    );
-    let digestOpportunityAdapterBuffer = Buffer.from(digestOpportunityAdapter);
-
-    const signatureOpportunityAdapter = await sign(
-      digestOpportunityAdapterBuffer,
-      payer.secretKey.slice(0, 32)
-    );
-    const signatureOpportunityAdapterFirst32 =
-      signatureOpportunityAdapter.slice(0, 32);
-    const signatureOpportnityAdapterLast32 = signatureOpportunityAdapter.slice(
-      32,
-      64
-    );
-    let signatureAccountingOpportunityAdapter =
-      await PublicKey.findProgramAddressSync(
-        [
-          anchor.utils.bytes.utf8.encode("signature_accounting"),
-          signatureOpportunityAdapterFirst32,
-          signatureOpportnityAdapterLast32,
-        ],
-        opportunityAdapter.programId
-      );
-    let indexCheckTokenBalances;
-    if (protocolLiquidate == "ezlend") {
-      indexCheckTokenBalances = 4;
-    } else if (protocolLiquidate == "kamino") {
-      indexCheckTokenBalances = 18;
-    } else if (protocolLiquidate == "none") {
-      indexCheckTokenBalances = 3;
-    }
-    if (omitOpportunityAdapter) {
-      indexCheckTokenBalances -= 1;
-    }
-    const ixInitializeTokenExpectations = await opportunityAdapter.methods
-      .initializeTokenExpectations({
-        sellTokens: sellTokens,
-        buyTokens: buyTokens,
-        indexCheckTokenBalances: indexCheckTokenBalances,
-        validUntil: validUntilOpportunityAdapter,
-        signature: signatureOpportunityAdapter,
-      })
-      .accounts({
-        relayer: relayerSigner.publicKey,
-        user: payer.publicKey,
-        opportunityAdapterAuthority: opportunityAdapterAuthority[0],
-        signatureAccounting: signatureAccountingExpressRelay[0], // TODO: fix the contracts to have only one sigver in ExpressRelay
-        // signatureAccounting: signatureAccountingOpportunityAdapter[0],
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .remainingAccounts(remainingAccountsOpportunityAdapter)
-      .signers([relayerSigner])
-      .instruction();
-
-    const ixCheckTokenBalances = await opportunityAdapter.methods
-      .checkTokenBalances()
-      .accounts({
-        relayer: relayerSigner.publicKey,
-        relayerRentReceiver: relayerRentReceiver.publicKey,
-        user: payer.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .remainingAccounts(remainingAccountsOpportunityAdapter)
-      .signers([relayerSigner])
-      .instruction();
-
-    const ixSigVerifyOpportunityAdapter =
-      anchor.web3.Ed25519Program.createInstructionWithPublicKey({
-        publicKey: payer.publicKey.toBytes(),
-        message: digestOpportunityAdapterBuffer,
-        signature: signatureOpportunityAdapter,
-      });
-
-    console.log("LENGTH OF IXS' DATA");
-    const bytesDataPermission = ixPermission.data.length;
-    const bytesDataInitializeTokenExpectations =
-      ixInitializeTokenExpectations.data.length;
-    const bytesDataLiquidate = ixLiquidate.data.length;
-    const bytesDataSigVerifyOpportunityAdapter =
-      ixSigVerifyOpportunityAdapter.data.length;
-    const bytesDataCheckTokenBalances = ixCheckTokenBalances.data.length;
-    const bytesDataSigVerifyExpressRelay = ixSigVerifyExpressRelay.data.length;
-    const bytesDataDepermission = ixDepermission.data.length;
-    console.log("Permission: ", bytesDataPermission);
-    console.log(
-      "InitializeTokenExpectations: ",
-      bytesDataInitializeTokenExpectations
-    );
-    console.log("Liquidate: ", bytesDataLiquidate);
-    console.log(
-      "SigVerifyOpportunityAdapter: ",
-      bytesDataSigVerifyOpportunityAdapter
-    );
-    console.log("CheckTokenBalances: ", bytesDataCheckTokenBalances);
-    console.log("SigVerifyExpressRelay: ", bytesDataSigVerifyExpressRelay);
-    console.log("Depermission: ", bytesDataDepermission);
-    console.log(
-      "Total: ",
-      bytesDataPermission +
-        bytesDataInitializeTokenExpectations +
-        bytesDataLiquidate +
-        bytesDataSigVerifyOpportunityAdapter +
-        bytesDataCheckTokenBalances +
-        bytesDataSigVerifyExpressRelay +
-        bytesDataDepermission
-    );
-
     // create transaction
     let transaction = new anchor.web3.Transaction();
 
     transaction.add(ixPermission); // 48, 40 + 8
-    if (!omitOpportunityAdapter) {
-      transaction.add(ixInitializeTokenExpectations); // 56, variable (98 w 1 buy/1 sell) + 8
-    }
+    transaction.add(ixSigVerifyExpressRelay); // 0, 136 + 8
 
     if (protocolLiquidate == "ezlend") {
       // ez lend
@@ -1037,20 +936,6 @@ describe("express_relay", () => {
       throw new Error("Invalid protocol liquidation");
     }
 
-    if (!omitOpportunityAdapter) {
-      if (omitOpportunityAdapterSigVerify) {
-        transaction.add(ixSigVerifyOpportunityAdapter); // 0, 136 + 8
-      }
-      if (transaction.instructions.length != indexCheckTokenBalances) {
-        console.log("txs length here is ", transaction.instructions.length);
-        throw new Error(
-          "Need to match the check token balances ix with the prespecified index"
-        );
-      }
-      transaction.add(ixCheckTokenBalances); // 40, 0 + 8
-    }
-
-    transaction.add(ixSigVerifyExpressRelay); // 0, 136 + 8
     transaction.add(ixDepermission); // 120, 104 + 8
 
     let solProtocolPre = await provider.connection.getBalance(
@@ -1082,7 +967,6 @@ describe("express_relay", () => {
     accountsGlobal.add(expressRelayMetadata[0]);
     accountsGlobal.add(WRAPPED_SOL_MINT);
     accountsGlobal.add(wsolTaExpressRelay[0]);
-    accountsGlobal.add(opportunityAdapterAuthority[0]);
     accountsGlobal.add(expressRelayAuthority[0]);
 
     // programs
@@ -1091,7 +975,6 @@ describe("express_relay", () => {
     accountsGlobal.add(anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY);
     accountsGlobal.add(ASSOCIATED_TOKEN_PROGRAM_ID);
     accountsGlobal.add(expressRelay.programId);
-    accountsGlobal.add(opportunityAdapter.programId);
     accountsGlobal.add(Ed25519Program.programId);
 
     // per protocol

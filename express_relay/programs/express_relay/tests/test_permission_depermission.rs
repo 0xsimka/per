@@ -3,11 +3,23 @@ pub mod helpers;
 use anchor_lang::prelude::*;
 use solana_program_test::{ProgramTest, tokio};
 use solana_sdk::{account::Account, signature::Keypair, signer::Signer, system_instruction};
-use express_relay::{state::SEED_PERMISSION};
+use express_relay::state::{OpportunityAdapterArgsWithMints, SEED_PERMISSION};
 use helpers::{initialize, express_relay_tx};
 
 #[tokio::test]
 async fn test_permission_depermission() {
+    permission_depermission_template(None).await;
+}
+
+#[tokio::test]
+async fn test_permission_depermission_empty_opportunity() {
+    permission_depermission_template(Some(OpportunityAdapterArgsWithMints {
+        sell_token_amounts: vec![],
+        buy_token_amounts: vec![],
+    })).await;
+}
+
+async fn permission_depermission_template(opportunity_adapter_args: Option<OpportunityAdapterArgsWithMints>) {
     let mut program_test = ProgramTest::new(
         "express_relay",
         express_relay::id(),
@@ -65,7 +77,8 @@ async fn test_permission_depermission() {
         protocol,
         permission_id.into(),
         bid_id,
-        bid_amount
+        bid_amount,
+        opportunity_adapter_args
     ).await;
 
     let expected_fees_protocol = 20_000_000;

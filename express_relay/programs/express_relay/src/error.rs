@@ -16,4 +16,6 @@ pub enum ExpressRelayError {
     SignatureExpired,
     #[msg("Signature verification failed")]
     SignatureVerificationFailed,
+    #[msg("Token expectation not met")]
+    TokenExpectationNotMet,
 }

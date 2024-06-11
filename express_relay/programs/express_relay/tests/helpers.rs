@@ -1,10 +1,10 @@
 use anchor_lang::{prelude::*, system_program};
-use anchor_spl::{associated_token::get_associated_token_address, token};
+use anchor_spl::{associated_token::{self, get_associated_token_address}, token};
 use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_program_test::ProgramTestContext;
 use solana_sdk::{account::Account, ed25519_instruction, instruction::Instruction, signature::Keypair, signer::Signer, sysvar::instructions::id as sysvar_instructions_id, transaction::Transaction};
 use anchor_lang::{ToAccountMetas, InstructionData};
-use express_relay::{state::{SEED_METADATA, SEED_CONFIG_PROTOCOL, SEED_PERMISSION, SEED_EXPRESS_RELAY_FEES, SEED_AUTHORITY, SEED_SIGNATURE_ACCOUNTING, ExpressRelayMetadata}, InitializeArgs, SetRelayerArgs, SetSplitsArgs, PermissionArgs, DepermissionArgs, accounts::{Initialize, SetRelayer, SetSplits, Permission, Depermission}};
+use express_relay::{accounts::{Depermission, Initialize, Permission, SetRelayer, SetSplits}, state::{ExpressRelayMetadata, OpportunityAdapterArgsWithMints, SEED_AUTHORITY, SEED_CONFIG_PROTOCOL, SEED_EXPRESS_RELAY_FEES, SEED_METADATA, SEED_PERMISSION, SEED_SIGNATURE_ACCOUNTING, SEED_TOKEN_EXPECTATION}, InitializeArgs, OpportunityAdapterArgs, PermissionArgs, SetRelayerArgs, SetSplitsArgs};
 use std::str::FromStr;
 use solana_program::{hash, system_instruction, ed25519_program};
 use spl_token::instruction::{approve, sync_native};
@@ -137,7 +137,8 @@ pub async fn express_relay_tx(
     protocol: Pubkey,
     permission_id: [u8; 32],
     bid_id: [u8; 16],
-    bid_amount: u64
+    bid_amount: u64,
+    opportunity_adapter_args_with_mints: Option<OpportunityAdapterArgsWithMints>,
 ) -> (u64, u64, u64) {
     let express_relay_metadata = Pubkey::find_program_address(&[SEED_METADATA], &express_relay::id()).0;
 
@@ -156,42 +157,6 @@ pub async fn express_relay_tx(
     let permission = Pubkey::find_program_address(&[SEED_PERMISSION, &protocol.to_bytes(), &permission_id], &express_relay::id()).0;
 
     let valid_until: u64 = 20_000_000_000_000;
-    let mut msg: [u8; 112] = [0; 32+32+32+8+8];
-    msg[..32].copy_from_slice(&protocol.key().to_bytes());
-    msg[32..64].copy_from_slice(&permission_id);
-    msg[64..96].copy_from_slice(&searcher_payer.pubkey().key().to_bytes());
-    msg[96..104].copy_from_slice(&bid_amount.to_le_bytes());
-    msg[104..].copy_from_slice(&valid_until.to_le_bytes());
-    let digest = hash::hash(&msg);
-    let signature: [u8; 64] = searcher_payer.sign_message(digest.as_ref()).as_ref().try_into().unwrap();
-
-    let signature_accounting = Pubkey::find_program_address(
-        &[
-            SEED_SIGNATURE_ACCOUNTING,
-            &signature[..32],
-            &signature[32..]
-        ], &express_relay::id()).0;
-
-    let permission_ix = Instruction {
-        program_id: express_relay::id(),
-        data:
-        express_relay::instruction::Permission {
-            data:
-                Box::new(
-                    PermissionArgs {
-                        // bid_id: bid_id.clone(),
-                        bid_amount: bid_amount.clone(),
-                    }
-                )
-        }.data(),
-        accounts: Permission {
-            relayer_signer: relayer_signer.pubkey(),
-            permission: permission,
-            system_program: system_program::ID,
-            sysvar_instructions: sysvar_instructions_id(),
-        }
-        .to_account_metas(None),
-    };
 
     let protocol_fee_receiver = Pubkey::find_program_address(&[SEED_EXPRESS_RELAY_FEES], &protocol).0;
     let wsol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
@@ -246,36 +211,144 @@ pub async fn express_relay_tx(
             .unwrap();
     }
 
-    let depermission_ix = Instruction {
+    let mut msg = Vec::new();
+
+    msg.extend_from_slice(&protocol.key().to_bytes());
+    msg.extend_from_slice(&permission_id);
+    msg.extend_from_slice(&searcher_payer.pubkey().key().to_bytes());
+    msg.extend_from_slice(&bid_amount.to_le_bytes());
+    msg.extend_from_slice(&valid_until.to_le_bytes());
+
+    let mut remaining_accounts;
+    let opportunity_adapter_args;
+
+    match opportunity_adapter_args_with_mints {
+        Some(args) => {
+            let mut sell_tokens = vec![];
+            let mut buy_tokens = vec![];
+
+            let buy_token_amounts = args.buy_token_amounts;
+            let sell_token_amounts = args.sell_token_amounts;
+
+            let n_buy_tokens = buy_token_amounts.len() as u8;
+            let n_sell_tokens = sell_token_amounts.len() as u8;
+
+            msg.push(n_buy_tokens);
+            msg.push(n_sell_tokens);
+
+            for buy_token in buy_token_amounts.iter() {
+                msg.extend_from_slice(&buy_token.mint.to_bytes());
+                msg.extend_from_slice(&buy_token.amount.to_le_bytes());
+                buy_tokens.push(buy_token.amount);
+            }
+            for sell_token in sell_token_amounts.iter() {
+                msg.extend_from_slice(&sell_token.mint.to_bytes());
+                msg.extend_from_slice(&sell_token.amount.to_le_bytes());
+                sell_tokens.push(sell_token.amount);
+            }
+
+            remaining_accounts = vec![
+                AccountMeta::new_readonly(searcher_payer.pubkey(), false),
+                AccountMeta::new_readonly(express_relay_authority, false),
+                AccountMeta::new_readonly(token::ID, false),
+                AccountMeta::new_readonly(associated_token::ID, false),
+            ];
+
+            for sell_token in sell_token_amounts {
+                let sell_token_ata_user = get_associated_token_address(&searcher_payer.pubkey(), &sell_token.mint);
+                let sell_token_ata_relayer = get_associated_token_address(&relayer_signer.pubkey(), &sell_token.mint);
+                let token_expectation_acc = Pubkey::find_program_address(&[SEED_TOKEN_EXPECTATION, &searcher_payer.pubkey().to_bytes(), &sell_token.mint.to_bytes()], &express_relay::id()).0;
+                remaining_accounts.push(AccountMeta::new_readonly(sell_token.mint, false));
+                remaining_accounts.push(AccountMeta::new(sell_token_ata_user, false));
+                remaining_accounts.push(AccountMeta::new(token_expectation_acc, false));
+                remaining_accounts.push(AccountMeta::new(sell_token_ata_relayer, false));
+            }
+            for buy_token in buy_token_amounts {
+                let buy_token_ata_user = get_associated_token_address(&searcher_payer.pubkey(), &buy_token.mint);
+                let buy_token_ata_relayer = get_associated_token_address(&relayer_signer.pubkey(), &buy_token.mint);
+                let token_expectation_acc = Pubkey::find_program_address(&[SEED_TOKEN_EXPECTATION, &searcher_payer.pubkey().to_bytes(), &buy_token.mint.to_bytes()], &express_relay::id()).0;
+                remaining_accounts.push(AccountMeta::new_readonly(buy_token.mint, false));
+                remaining_accounts.push(AccountMeta::new(buy_token_ata_user, false));
+                remaining_accounts.push(AccountMeta::new(token_expectation_acc, false));
+                remaining_accounts.push(AccountMeta::new(buy_token_ata_relayer, false));
+            }
+
+            opportunity_adapter_args = Some(OpportunityAdapterArgs {
+                sell_tokens,
+                buy_tokens,
+            })
+        },
+        None => {
+            remaining_accounts = vec![];
+            opportunity_adapter_args = None;
+        }
+    }
+    let msg: &[u8] = &msg;
+    let digest = hash::hash(&msg);
+    let signature: [u8; 64] = searcher_payer.sign_message(digest.as_ref()).as_ref().try_into().unwrap();
+
+    let signature_accounting = Pubkey::find_program_address(
+        &[
+            SEED_SIGNATURE_ACCOUNTING,
+            &signature[..32],
+            &signature[32..]
+        ], &express_relay::id()).0;
+
+    let mut permission_accounts = Permission {
+        relayer_signer: relayer_signer.pubkey(),
+        permission: permission,
+        protocol: protocol,
+        signature_accounting: signature_accounting,
+        system_program: system_program::ID,
+        sysvar_instructions: sysvar_instructions_id(),
+    }
+    .to_account_metas(None);
+    permission_accounts.extend(remaining_accounts.clone());
+
+    let permission_ix = Instruction {
         program_id: express_relay::id(),
         data:
-        express_relay::instruction::Depermission {
-            data: Box::new(
-                DepermissionArgs {
-                permission_id,
-                valid_until,
-                signature
-            })
+        express_relay::instruction::Permission {
+            data:
+                Box::new(
+                    PermissionArgs {
+                        permission_id: permission_id.clone(),
+                        signature: signature.clone(),
+                        valid_until: valid_until.clone(),
+                        bid_amount: bid_amount.clone(),
+                        opportunity_adapter_args: opportunity_adapter_args,
+                    }
+                )
         }.data(),
-        accounts: Depermission {
-            relayer_signer: relayer_signer.pubkey(),
-            permission: permission,
-            user: searcher_payer.pubkey(),
-            protocol: protocol,
-            protocol_fee_receiver: protocol_fee_receiver,
-            relayer_fee_receiver: relayer_fee_receiver,
-            protocol_config: protocol_config,
-            express_relay_metadata: express_relay_metadata,
-            wsol_mint: wsol_mint,
-            wsol_ta_user: wsol_ta_user,
-            wsol_ta_express_relay: wsol_ta_express_relay,
-            express_relay_authority: express_relay_authority,
-            signature_accounting: signature_accounting,
-            token_program: token::ID,
-            system_program: system_program::ID,
-            sysvar_instructions: sysvar_instructions_id(),
-        }
-        .to_account_metas(None),
+        accounts: permission_accounts,
+    };
+
+    let mut depermission_accounts = Depermission {
+        relayer_signer: relayer_signer.pubkey(),
+        permission: permission,
+        user: searcher_payer.pubkey(),
+        protocol: protocol,
+        protocol_fee_receiver: protocol_fee_receiver,
+        relayer_fee_receiver: relayer_fee_receiver,
+        protocol_config: protocol_config,
+        express_relay_metadata: express_relay_metadata,
+        wsol_mint: wsol_mint,
+        wsol_ta_user: wsol_ta_user,
+        wsol_ta_express_relay: wsol_ta_express_relay,
+        express_relay_authority: express_relay_authority,
+        token_program: token::ID,
+        system_program: system_program::ID,
+        sysvar_instructions: sysvar_instructions_id(),
+    }
+    .to_account_metas(None);
+    if remaining_accounts.len() > 4 {
+        depermission_accounts.extend(remaining_accounts[4..].to_vec());
+    }
+
+    let depermission_ix = Instruction {
+        program_id: express_relay::id(),
+        data: express_relay::instruction::Depermission {}.data(),
+        accounts: depermission_accounts,
     };
 
     // TODO: use a library to construct this
