@@ -338,7 +338,6 @@ pub async fn express_relay_tx(
         express_relay_authority: express_relay_authority,
         token_program: token::ID,
         system_program: system_program::ID,
-        sysvar_instructions: sysvar_instructions_id(),
     }
     .to_account_metas(None);
     if remaining_accounts.len() > 4 {

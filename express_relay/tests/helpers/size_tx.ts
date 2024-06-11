@@ -57,6 +57,8 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
   const sizeBlockhash = 32;
   const sizeNInstructions = compactHeader(tx.instructions.length);
 
+  console.log("Size of header: ", sizeHeader);
+  console.log("Size of blockhash: ", sizeBlockhash);
   console.log("Size of signatures: ", sizeSignatures);
   console.log("Size of accounts: ", sizeAccounts);
   console.log("Size of number of instructions: ", sizeNInstructions);
@@ -121,10 +123,13 @@ export const getVersionedTxSize = (
     tx.message.compiledInstructions.length
   );
 
+  console.log("Size of header: ", sizeHeader);
+  console.log("Size of blockhash: ", sizeBlockhash);
   console.log("Size of signatures: ", sizeSignatures);
   console.log("Size of accounts: ", sizeAccounts);
   console.log("Size of number of instructions: ", sizeNInstructions);
   console.log("Size of ixs: ", ixsSize);
+  console.log("Size of lookup: ", lookupSize);
 
   return (
     sizeSignatures +

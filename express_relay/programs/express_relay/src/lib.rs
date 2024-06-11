@@ -226,8 +226,10 @@ pub mod express_relay {
             return err!(ExpressRelayError::PermissioningOutOfOrder)
         }
 
-        // check that permission account matches permission in depermission instruction
+        // check that permission account matches permission in depermission
         assert_eq!(permission.key(), ix_depermission.accounts[1].pubkey, "Permission account does not match permission in depermission instruction");
+        // check that relayer_signer matches relayer_signer in depermission
+        assert_eq!(relayer_signer.key(), ix_depermission.accounts[0].pubkey, "Relayer signer account does not match relayer signer in depermission instruction");
 
         let permission_data = &mut permission.load_init()?;
         permission_data.balance = permission.to_account_info().lamports();
@@ -266,7 +268,7 @@ pub mod express_relay {
                 assert_eq!(expected_changes.len() * 4, remaining_accounts.len());
 
                 // TODO: make this offset determination programmatic in the future
-                let offset_accounts_check_token_balances: usize = 15;
+                let offset_accounts_check_token_balances: usize = 14;
                 assert_eq!(remaining_accounts.len() + offset_accounts_check_token_balances, ix_depermission.accounts.len());
 
                 for (i, expected_change) in expected_changes.iter().enumerate() {
@@ -439,7 +441,6 @@ pub mod express_relay {
         let wsol_ta_express_relay = &ctx.accounts.wsol_ta_express_relay;
         let express_relay_authority = &ctx.accounts.express_relay_authority;
         let token_program = &ctx.accounts.token_program;
-        let sysvar_ixs = &ctx.accounts.sysvar_instructions;
 
         let permission_data = permission.load()?;
         let bid_amount = permission_data.bid_amount;
@@ -702,7 +703,4 @@ pub struct Depermission<'info> {
     pub express_relay_authority: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
-    /// CHECK: this is the sysvar instructions account
-    #[account(address = tx_instructions::ID)]
-    pub sysvar_instructions: UncheckedAccount<'info>,
 }
