@@ -165,7 +165,8 @@ export async function liquidateAndRedeem(
   repayReserve: KaminoReserve,
   withdrawReserve: KaminoReserve,
   obligation: KaminoObligation,
-  config: LiquidationConfig
+  config: LiquidationConfig,
+  elimIxs = "none"
 ): Promise<TransactionInstruction[]> {
   const { overrides, txConfig } = config;
   const ob = `${obligation.obligationAddress}`;
@@ -182,7 +183,8 @@ export async function liquidateAndRedeem(
     withdrawReserve.address,
     Number(liquidityAmount),
     new Decimal(0), // todo elliot
-    overrides.ltvPct ?? 0
+    overrides.ltvPct ?? 0,
+    elimIxs
   );
   ixs.push(...liquidationIxs);
 
@@ -227,7 +229,8 @@ export const getLiquidationInstructionsFromAction = async (
   withdrawReserveAddress: PublicKey,
   liquidityAmount: number | string,
   minCollateralReceiveLamports: Decimal,
-  maxAllowedLtvOverridePercent: number = 0
+  maxAllowedLtvOverridePercent: number = 0,
+  elimIxs: string = "none"
 ): Promise<{
   ixs: TransactionInstruction[];
   labels: string[];
@@ -268,6 +271,20 @@ export const getLiquidationInstructionsFromAction = async (
       withdrawReserve.getLiquidityMint()
     );
 
+  if (elimIxs == "initFarm") {
+    // get rid of initObligationForFarm ixs
+    liquidateAction.setupIxs = liquidateAction.setupIxs
+      .slice(0, 1)
+      .concat(liquidateAction.setupIxs.slice(5));
+  } else if (elimIxs == "farm") {
+    // get rid of all farm ixs
+    liquidateAction.setupIxs = liquidateAction.setupIxs
+      .slice(0, 1)
+      .concat(liquidateAction.setupIxs.slice(5, 8));
+  } else if (elimIxs != "none") {
+    throw new Error(`Invalid elimIxs: ${elimIxs}`);
+  }
+
   const labels = [
     `CreateUserAta[${withdrawAta.toBase58()}]`,
     `CreateCollateralUserAta[${withdrawCTokenAta.toBase58()}]`,
@@ -276,39 +293,42 @@ export const getLiquidationInstructionsFromAction = async (
     ...liquidateAction.cleanupIxsLabels,
   ];
   console.log("HERE ARE THE IXS FROM KAMINO");
-  console.log("#1");
-  console.log(withdrawAtaIx);
-  console.log("#2");
-  console.log(withdrawCTokenAtaIx);
+  // console.log("#1");
+  // console.log(withdrawAtaIx);
+  // console.log("#2");
+  // console.log(withdrawCTokenAtaIx);
   console.log("#3");
-  for (let i = 0; i < liquidateAction.setupIxs.length; i++) {
-    console.log("KEYS");
-    console.log(liquidateAction.setupIxs[i].keys);
-    console.log("DATA");
-    console.log(liquidateAction.setupIxs[i].data);
-    console.log("PID");
-    console.log(liquidateAction.setupIxs[i].programId);
-  }
+  console.log("LENGTH OF SETUP IXS", liquidateAction.setupIxs.length);
+  // for (let i = 0; i < liquidateAction.setupIxs.length; i++) {
+  //   console.log("KEYS");
+  //   console.log(liquidateAction.setupIxs[i].keys);
+  //   console.log("DATA");
+  //   console.log(liquidateAction.setupIxs[i].data);
+  //   console.log("PID");
+  //   console.log(liquidateAction.setupIxs[i].programId);
+  // }
   console.log("");
   console.log("#4");
-  for (let i = 0; i < liquidateAction.lendingIxs.length; i++) {
-    console.log("KEYS");
-    console.log(liquidateAction.lendingIxs[i].keys);
-    console.log("DATA");
-    console.log(liquidateAction.lendingIxs[i].data);
-    console.log("PID");
-    console.log(liquidateAction.lendingIxs[i].programId);
-  }
+  console.log("LENGTH OF LENDING IXS", liquidateAction.lendingIxs.length);
+  // for (let i = 0; i < liquidateAction.lendingIxs.length; i++) {
+  //   console.log("KEYS");
+  //   console.log(liquidateAction.lendingIxs[i].keys);
+  //   console.log("DATA");
+  //   console.log(liquidateAction.lendingIxs[i].data);
+  //   console.log("PID");
+  //   console.log(liquidateAction.lendingIxs[i].programId);
+  // }
   console.log("");
   console.log("#5");
-  for (let i = 0; i < liquidateAction.cleanupIxs.length; i++) {
-    console.log("KEYS");
-    console.log(liquidateAction.cleanupIxs[i].keys);
-    console.log("DATA");
-    console.log(liquidateAction.cleanupIxs[i].data);
-    console.log("PID");
-    console.log(liquidateAction.cleanupIxs[i].programId);
-  }
+  console.log("LENGTH OF CLEANUP IXS", liquidateAction.cleanupIxs.length);
+  // for (let i = 0; i < liquidateAction.cleanupIxs.length; i++) {
+  //   console.log("KEYS");
+  //   console.log(liquidateAction.cleanupIxs[i].keys);
+  //   console.log("DATA");
+  //   console.log(liquidateAction.cleanupIxs[i].data);
+  //   console.log("PID");
+  //   console.log(liquidateAction.cleanupIxs[i].programId);
+  // }
   return {
     ixs: [
       withdrawAtaIx,
