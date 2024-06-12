@@ -2,11 +2,11 @@ pub mod error;
 pub mod state;
 pub mod utils;
 
-use anchor_lang::{prelude::*, system_program::{System, create_account, CreateAccount}};
+use anchor_lang::{prelude::*, system_program::System};
 use anchor_lang::{AccountsClose, solana_program::sysvar::instructions as tx_instructions};
-use solana_program::{hash, clock::Clock, serialize_utils::read_u16, sysvar::instructions::{load_current_index_checked, load_instruction_at_checked}};
+use solana_program::{serialize_utils::read_u16, sysvar::instructions::{load_current_index_checked, load_instruction_at_checked}};
 use anchor_syn::codegen::program::common::sighash;
-use anchor_spl::token::{self, TokenAccount, Token, Mint, Transfer as SplTransfer, CloseAccount, ID as SPL_TOKEN_PROGRAM_ID};
+use anchor_spl::token::{self, TokenAccount, Token, Mint, Transfer as SplTransfer, ID as SPL_TOKEN_PROGRAM_ID};
 use anchor_spl::associated_token::{Create, create, ID as SPL_ASSOCIATED_TOKEN_ACCOUNT_ID};
 use crate::{
     error::ExpressRelayError,
@@ -16,123 +16,6 @@ use crate::{
 use std::str::FromStr;
 
 declare_id!("AJ9QckBqWJdz5RAxpMi2P83q6R7y5xZ2yFxCAYr3bg3N");
-
-#[inline(never)]
-pub fn handle_wsol_transfer<'info>(
-    wsol_ta_user: &Account<'info, TokenAccount>,
-    wsol_ta_express_relay: &Account<'info, TokenAccount>,
-    express_relay_authority: &UncheckedAccount<'info>,
-    token_program: &Program<'info, Token>,
-    bump_express_relay_authority: u8,
-    permission: &AccountLoader<'info, PermissionMetadata>,
-    wsol_mint: &Account<'info, Mint>,
-    bump_wsol_ta_express_relay: u8,
-) -> Result<()> {
-    let permission_data = permission.load()?;
-    let bid_amount = permission_data.bid_amount;
-    drop(permission_data);
-
-    // wrapped sol transfer
-    let cpi_accounts_transfer = SplTransfer {
-        from: wsol_ta_user.to_account_info().clone(),
-        to: wsol_ta_express_relay.to_account_info().clone(),
-        authority: express_relay_authority.to_account_info().clone(),
-    };
-    let cpi_program_transfer = token_program.to_account_info();
-    token::transfer(
-        CpiContext::new_with_signer(
-            cpi_program_transfer,
-            cpi_accounts_transfer,
-            &[
-                &[
-                    SEED_AUTHORITY,
-                    &[bump_express_relay_authority]
-                ]
-            ]
-        ),
-        bid_amount
-    )?;
-
-    // close wsol_ta_express_relay to get the SOL
-    let cpi_accounts_close = CloseAccount {
-        account: wsol_ta_express_relay.to_account_info().clone(),
-        destination: permission.to_account_info().clone(),
-        authority: wsol_ta_express_relay.to_account_info().clone(),
-    };
-    let cpi_program_close = token_program.to_account_info();
-    token::close_account(
-        CpiContext::new_with_signer(
-            cpi_program_close,
-            cpi_accounts_close,
-            &[
-                &[
-                    b"ata",
-                    wsol_mint.key().as_ref(),
-                    &[bump_wsol_ta_express_relay]
-                ]
-            ]
-        )
-    )?;
-
-    Ok(())
-}
-
-#[inline(never)]
-pub fn validate_signature(
-    sysvar_ixs: &UncheckedAccount,
-    data: Box<PermissionArgs>,
-    protocol_key: Pubkey,
-    user_key: Pubkey,
-    opportunity_adapter_args: Option<OpportunityAdapterArgsWithMints>,
-) -> Result<()> {
-    let bid_amount = data.bid_amount;
-    let permission_id = data.permission_id;
-    let valid_until = data.valid_until;
-
-    let timestamp = Clock::get()?.unix_timestamp as u64;
-    if timestamp > valid_until {
-        return err!(ExpressRelayError::SignatureExpired)
-    }
-
-    let index_permission = load_current_index_checked(sysvar_ixs)?;
-    let ix = load_instruction_at_checked((index_permission+1) as usize, sysvar_ixs)?;
-
-    let mut msg_vec = Vec::new();
-
-    msg_vec.extend_from_slice(&protocol_key.to_bytes());
-    msg_vec.extend_from_slice(&permission_id);
-    msg_vec.extend_from_slice(&user_key.to_bytes());
-    msg_vec.extend_from_slice(&bid_amount.to_le_bytes());
-    msg_vec.extend_from_slice(&valid_until.to_le_bytes());
-
-    match opportunity_adapter_args {
-        Some(args) => {
-            let buy_tokens = args.buy_token_amounts;
-            let sell_tokens = args.sell_token_amounts;
-
-            let n_buy_tokens = buy_tokens.len() as u8;
-            let n_sell_tokens = sell_tokens.len() as u8;
-
-            msg_vec.push(n_buy_tokens);
-            msg_vec.push(n_sell_tokens);
-            for buy_token in buy_tokens.iter() {
-                msg_vec.extend_from_slice(&buy_token.mint.to_bytes());
-                msg_vec.extend_from_slice(&buy_token.amount.to_le_bytes());
-            }
-            for sell_token in sell_tokens.iter() {
-                msg_vec.extend_from_slice(&sell_token.mint.to_bytes());
-                msg_vec.extend_from_slice(&sell_token.amount.to_le_bytes());
-            }
-        }
-
-        None => {}
-    }
-    let msg: &[u8] = &msg_vec;
-    let digest = hash::hash(msg);
-    verify_ed25519_ix(&ix, &user_key.to_bytes(), digest.as_ref(), &data.signature)?;
-
-    Ok(())
-}
 
 #[program]
 pub mod express_relay {
@@ -188,6 +71,7 @@ pub mod express_relay {
         let relayer_signer = &ctx.accounts.relayer_signer;
         let permission = &ctx.accounts.permission;
         let protocol = &ctx.accounts.protocol;
+        let signature_accounting = &ctx.accounts.signature_accounting;
         let sysvar_ixs = &ctx.accounts.sysvar_instructions;
         let system_program = &ctx.accounts.system_program;
 
@@ -246,9 +130,14 @@ pub mod express_relay {
                 let token_program = &ctx.remaining_accounts[2];
                 let associated_token_program = &ctx.remaining_accounts[3];
 
+                let user_key = user.key();
+
                 // validate express_relay_authority
-                let (pda_express_relay_authority, bump_express_relay_authority) = Pubkey::find_program_address(&[SEED_AUTHORITY], ctx.program_id);
-                assert_eq!(pda_express_relay_authority, express_relay_authority.key());
+                let bump_express_relay_authority = validate_pda(
+                    &[SEED_AUTHORITY],
+                    ctx.program_id,
+                    express_relay_authority.key()
+                )?;
 
                 // validate the token_program
                 assert_eq!(token_program.key(), SPL_TOKEN_PROGRAM_ID);
@@ -320,43 +209,36 @@ pub mod express_relay {
                     assert_eq!(ta_relayer_data.mint, mint_acc.key());
                     assert_eq!(ta_relayer_data.owner, relayer_signer.key());
 
+                    let mint_key = mint_acc.key();
                     // validate the address of the token_expectation_acc
-                    let (pda_token_expectation, bump_token_expectation) = Pubkey::find_program_address(&[SEED_TOKEN_EXPECTATION, user.key().as_ref(), mint_acc.key().as_ref()], ctx.program_id);
-                    assert_eq!(pda_token_expectation, token_expectation_acc.key());
-                    assert_eq!(token_expectation_acc.lamports(), 0);
+                    let seeds_token_expectation = &[
+                        SEED_TOKEN_EXPECTATION,
+                        user_key.as_ref(),
+                        mint_key.as_ref(),
+                    ];
 
-                    let discriminator_token_expectation = TokenExpectation::discriminator();
+                    let bump_token_expectation = validate_pda(
+                        seeds_token_expectation,
+                        ctx.program_id,
+                        token_expectation_acc.key()
+                    )?;
 
-                    if token_expectation_acc.lamports() == 0 {
-                        // create the token_expectation_acc
-                        let cpi_acounts_create_account = CreateAccount {
-                            from: relayer_signer.to_account_info().clone(),
-                            to: token_expectation_acc.clone(),
-                        };
-                        let space = RESERVE_TOKEN_EXPECTATION;
-                        let lamports = Rent::default().minimum_balance(space).max(1);
-                        let cpi_program = system_program.to_account_info();
-                        create_account(
-                            CpiContext::new_with_signer(
-                                cpi_program,
-                                cpi_acounts_create_account,
-                                &[
-                                    &[
-                                        SEED_TOKEN_EXPECTATION,
-                                        user.key().as_ref(),
-                                        mint_acc.key().as_ref(),
-                                        &[bump_token_expectation]
-                                    ]
-                                ]
-                            ),
-                            lamports,
-                            space as u64,
-                            ctx.program_id
-                        )?;
-
-                        // initialize the token_expectation_acc discriminator
-                        discriminator_token_expectation.serialize(&mut &mut token_expectation_acc.data.borrow_mut()[..8])?;
-                    }
+                    let seeds_token_expectation_with_bump = &[
+                        SEED_TOKEN_EXPECTATION,
+                        user_key.as_ref(),
+                        mint_key.as_ref(),
+                        &[bump_token_expectation]
+                    ];
+                    let discriminator_token_expectation = Some(TokenExpectation::discriminator());
+                    create_pda(
+                        token_expectation_acc.to_account_info(),
+                        relayer_signer.to_account_info(),
+                        system_program.to_account_info(),
+                        seeds_token_expectation_with_bump,
+                        ctx.program_id.key(),
+                        RESERVE_TOKEN_EXPECTATION,
+                        discriminator_token_expectation
+                    )?;
 
                     // check that the accounts in the later instruction match the accounts specified in this instruction
                     let mint_acc_check_token_balances = &ix_depermission.accounts[offset_accounts_check_token_balances + i * 4];
@@ -422,7 +304,35 @@ pub mod express_relay {
 
         let user_key = ix_depermission.accounts[2].pubkey;
 
-        validate_signature(sysvar_ixs, data, protocol.key(), user_key, opportunity_adapter_args)?;
+        let signature = validate_and_extract_signature(
+            sysvar_ixs,
+            data.permission_id,
+            data.bid_amount,
+            data.valid_until,
+            protocol.key(),
+            user_key,
+            opportunity_adapter_args
+        )?;
+
+        // validate and create signature
+        let seeds_signature_accounting = &[SEED_SIGNATURE_ACCOUNTING, &signature[..32], &signature[32..]];
+        let bump_signature_accounting = validate_pda(
+            seeds_signature_accounting,
+            ctx.program_id,
+            signature_accounting.key()
+        )?;
+
+        let seeds_signature_accounting_with_bump = &[SEED_SIGNATURE_ACCOUNTING, &signature[..32], &signature[32..], &[bump_signature_accounting]];
+        let discriminator_signature_accounting = Some(SignatureAccounting::discriminator());
+        create_pda(
+            signature_accounting.to_account_info(),
+            relayer_signer.to_account_info(),
+            system_program.to_account_info(),
+            seeds_signature_accounting_with_bump,
+            ctx.program_id.key(),
+            RESERVE_SIGNATURE_ACCOUNTING,
+            discriminator_signature_accounting
+        )?;
 
         Ok(())
     }
@@ -621,7 +531,6 @@ pub struct PermissionArgs {
     // TODO: maybe add bid_id back? depending on size constraints
     // pub bid_id: [u8; 16],
     pub permission_id: [u8; 32],
-    pub signature: [u8; 64],
     pub valid_until: u64,
     pub bid_amount: u64,
     pub opportunity_adapter_args: Option<OpportunityAdapterArgs>,
@@ -648,8 +557,9 @@ pub struct Permission<'info> {
     pub permission: AccountLoader<'info, PermissionMetadata>,
     /// CHECK: this is just the protocol program address
     pub protocol: UncheckedAccount<'info>,
-    #[account(init, payer = relayer_signer, space = RESERVE_SIGNATURE_ACCOUNTING, seeds = [SEED_SIGNATURE_ACCOUNTING, &data.signature[..32], &data.signature[32..]], bump)]
-    pub signature_accounting: AccountLoader<'info, SignatureAccounting>,
+    /// CHECK: have to manually validate and create this so as not to pass signature into PermissionArgs
+    #[account(mut)]
+    pub signature_accounting: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
     // TODO: https://github.com/solana-labs/solana/issues/22911
     /// CHECK: this is the sysvar instructions account

@@ -313,7 +313,6 @@ pub async fn express_relay_tx(
                 Box::new(
                     PermissionArgs {
                         permission_id: permission_id.clone(),
-                        signature: signature.clone(),
                         valid_until: valid_until.clone(),
                         bid_amount: bid_amount.clone(),
                         opportunity_adapter_args: opportunity_adapter_args,

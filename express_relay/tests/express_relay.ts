@@ -28,6 +28,7 @@ import {
   sendAndConfirmTransaction,
   Ed25519Program,
   TransactionInstruction,
+  AddressLookupTableAccount,
 } from "@solana/web3.js";
 import { assert, config } from "chai";
 import { getTxSize, getVersionedTxSize } from "./helpers/size_tx";
@@ -82,8 +83,9 @@ describe("express_relay", () => {
   // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
 
   // tx config
-  const protocolLiquidate: string = "ezlend"; // 'ezlend'
+  const protocolLiquidate: string = "kamino"; // 'ezlend'
   const omitOpportunityAdapter: boolean = false;
+  const elimIxs: string = "none";
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
@@ -558,7 +560,8 @@ describe("express_relay", () => {
       kaminoMarket.getReserveBySymbol("SOL"),
       kaminoMarket.getReserveBySymbol("USDC"),
       obligPost,
-      configLiquidation
+      configLiquidation,
+      elimIxs
     );
 
     kaminoLiquidator = liquidator;
@@ -870,7 +873,6 @@ describe("express_relay", () => {
     const ixPermission = await expressRelay.methods
       .permission({
         permissionId: vault_id_bytes,
-        signature: signatureExpressRelay,
         validUntil: validUntilExpressRelay,
         // bidId: bidId,
         bidAmount: bidAmount,
@@ -1051,8 +1053,12 @@ describe("express_relay", () => {
     console.log("LENGTH OF versioned msg: ", messageV0.serialize().length);
 
     // sign the v0 transaction
-    if (liquidatorEzLend != relayerSigner && protocolLiquidate == "ezlend") {
+    if (omitOpportunityAdapter && protocolLiquidate == "ezlend") {
       transactionV0.sign([relayerSigner, liquidatorEzLend]);
+    } else if (omitOpportunityAdapter && protocolLiquidate == "kamino") {
+      transactionV0.sign([relayerSigner, kaminoLiquidator]);
+    } else if (omitOpportunityAdapter) {
+      transactionV0.sign([relayerSigner, payer]);
     } else {
       transactionV0.sign([relayerSigner]);
     }
