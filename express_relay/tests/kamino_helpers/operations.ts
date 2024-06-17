@@ -371,7 +371,7 @@ export async function refreshReserves(env: Env, kaminoMarket: KaminoMarket) {
   tx.add(...ixns);
 
   const txHash = await constructAndSendVersionedTransaction(env, tx, []);
-  console.log(`Refreshed reserves with ${txHash}`);
+  console.debug(`Refreshed reserves with ${txHash}`);
 }
 
 export async function reloadReservesAndRefreshMarket(

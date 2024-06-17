@@ -27,3 +27,4 @@ node_modules
 
 # tmp run jsons
 express_relay/tmp/
+express_relay/tests/keys

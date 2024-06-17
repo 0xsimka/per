@@ -22,6 +22,6 @@ export async function createKeypair(
   const x = `[${liquidator.secretKey.toString()}]`;
 
   writeFileSync(liquidatorFile, x, { encoding: "utf-8" });
-  console.log(`Written to ${liquidatorFile}`);
+  console.debug(`Written to ${liquidatorFile}`);
   return [liquidator, liquidatorFile];
 }

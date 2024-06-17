@@ -101,15 +101,10 @@ export async function createAndPopulateLookupTable(
     Array.from(accounts)
   );
   transactionLookupTable.add(extendInstruction);
-  console.log("NUMBER OF accounts to put into table: ", accounts.size);
-  console.log(
-    "SIZE of transaction (create lookup tables): ",
-    getTxSize(transactionLookupTable, payer.publicKey)
-  );
   let signatureLookupTable = await c
     .sendTransaction(transactionLookupTable, [authority, payer], {})
     .catch((err) => {
-      console.log(err);
+      console.error(err);
     });
   const latestBlockHashLookupTable = await c.getLatestBlockhash();
   await c.confirmTransaction({
@@ -117,7 +112,6 @@ export async function createAndPopulateLookupTable(
     lastValidBlockHeight: latestBlockHashLookupTable.lastValidBlockHeight,
     signature: signatureLookupTable,
   });
-  console.log("Lookup table created");
 
   // sleep to allow the lookup table to activate
   await waitForNewBlock(c, 1);

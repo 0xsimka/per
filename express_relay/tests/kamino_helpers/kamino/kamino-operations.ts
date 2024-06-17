@@ -101,7 +101,6 @@ export async function updateGlobalConfig(
 ) {
   let value: bigint | PublicKey | boolean;
   if (flagValueType === "number") {
-    console.log("flagvalue is number");
     value = BigInt(flagValue);
   } else if (flagValueType === "bool") {
     if (flagValue === "false") {
@@ -139,7 +138,7 @@ export async function updateGlobalConfig(
 
   const sig = await constructAndSendVersionedTransaction(env, tx, []);
 
-  console.log("Update Global Config ", globalConfigOption.toJSON(), sig);
+  console.debug("Update Global Config ", globalConfigOption.toJSON(), sig);
 }
 
 export function getGlobalConfigValue(

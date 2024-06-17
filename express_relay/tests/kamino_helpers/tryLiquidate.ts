@@ -138,15 +138,6 @@ export function checkLiquidate(
   obligation: KaminoObligation,
   thresholdBufferFactor: Decimal
 ): LiquidationScenario | null {
-  console.log(
-    "obligation user total borrow borrow factor adjusted",
-    obligation.refreshedStats.userTotalBorrowBorrowFactorAdjusted.toString()
-  );
-  console.log(
-    "obligation borrow liquidation limit",
-    obligation.refreshedStats.borrowLiquidationLimit.toString()
-  );
-  console.log("threshold buffer factor", thresholdBufferFactor.toString());
   if (
     obligation.refreshedStats.userTotalBorrow.gt(0) &&
     obligation.refreshedStats.userTotalBorrowBorrowFactorAdjusted.gte(

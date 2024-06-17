@@ -207,13 +207,12 @@ export async function sendAndConfirmVersionedTransaction(
   tx: VersionedTransaction,
   commitment: Commitment = "confirmed",
   sendTransactionOptions: SendOptions = { preflightCommitment: "processed" }
-) {
+): Promise<TransactionSignature> {
   const defaultOptions: SendOptions = { skipPreflight: true };
   const txId = await c.sendTransaction(tx, {
     ...defaultOptions,
     ...sendTransactionOptions,
   });
-  console.log("Sending versioned txn", txId.toString());
 
   const latestBlockHash = await c.getLatestBlockhash("finalized");
   const t = await c.confirmTransaction(

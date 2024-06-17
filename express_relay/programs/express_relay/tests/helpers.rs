@@ -4,7 +4,7 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_program_test::ProgramTestContext;
 use solana_sdk::{account::Account, ed25519_instruction, instruction::Instruction, signature::Keypair, signer::Signer, sysvar::instructions::id as sysvar_instructions_id, transaction::Transaction};
 use anchor_lang::{ToAccountMetas, InstructionData};
-use express_relay::{accounts::{Depermission, Initialize, Permission, SetRelayer, SetSplits}, state::{ExpressRelayMetadata, OpportunityAdapterArgsWithMints, SEED_AUTHORITY, SEED_CONFIG_PROTOCOL, SEED_EXPRESS_RELAY_FEES, SEED_METADATA, SEED_PERMISSION, SEED_SIGNATURE_ACCOUNTING, SEED_TOKEN_EXPECTATION}, InitializeArgs, OpportunityAdapterArgs, PermissionArgs, SetRelayerArgs, SetSplitsArgs};
+use express_relay::{accounts::{Depermission, Initialize, Permission, SetRelayer, SetSplits}, state::{ExpressRelayMetadata, OpportunityAdapterArgsWithMints, SEED_AUTHORITY, SEED_CONFIG_PROTOCOL, SEED_EXPRESS_RELAY_FEES, SEED_METADATA, SEED_PERMISSION, SEED_SIGNATURE_ACCOUNTING, SEED_TOKEN_EXPECTATION}, InitializeArgs, OpportunityAdapterArgs, PermissionArgs, SetSplitsArgs};
 use std::str::FromStr;
 use solana_program::{hash, system_instruction, ed25519_program};
 use spl_token::instruction::{approve, sync_native};
@@ -59,9 +59,7 @@ pub async fn set_relayer(program_context: &mut ProgramTestContext, admin: Keypai
     let set_relayer_ix = Instruction {
         program_id: express_relay::id(),
         data:
-        express_relay::instruction::SetRelayer {
-            _data: SetRelayerArgs {}
-        }.data(),
+        express_relay::instruction::SetRelayer {}.data(),
         accounts: SetRelayer {
             admin: admin.pubkey(),
             express_relay_metadata: express_relay_metadata,

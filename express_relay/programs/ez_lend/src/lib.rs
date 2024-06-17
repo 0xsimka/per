@@ -55,7 +55,6 @@ pub mod ez_lend {
             CpiContext::new_with_signer(cpi_program, cpi_accounts, signer_seeds),
             data.debt_amount)?;
 
-
         vault.bump = ctx.bumps.vault;
         vault.collateral_mint = ctx.accounts.collateral_mint.key();
         vault.collateral_amount = data.collateral_amount;

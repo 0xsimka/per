@@ -28,6 +28,8 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
   const signers = new Set<string>(feePayerPk);
   const accounts = new Set<string>(feePayerPk);
 
+  let ixNumber = -1;
+
   const ixsSize = tx.instructions.reduce((acc, ix) => {
     ix.keys.forEach(({ pubkey, isSigner }) => {
       const pk = pubkey.toBase58();
@@ -40,9 +42,11 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
     const nIndexes = ix.keys.length;
     const opaqueData = ix.data.length;
 
-    console.log("n accounts in ix: ", nIndexes);
-    console.log("length of data in ix: ", opaqueData);
-    console.log("");
+    ixNumber += 1;
+
+    console.debug("ix number", ixNumber);
+    console.debug("n accounts in ix: ", nIndexes);
+    console.debug("length of data in ix: ", opaqueData);
     return (
       acc +
       1 + // PID index
@@ -57,12 +61,12 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
   const sizeBlockhash = 32;
   const sizeNInstructions = compactHeader(tx.instructions.length);
 
-  console.log("Size of header: ", sizeHeader);
-  console.log("Size of blockhash: ", sizeBlockhash);
-  console.log("Size of signatures: ", sizeSignatures);
-  console.log("Size of accounts: ", sizeAccounts);
-  console.log("Size of number of instructions: ", sizeNInstructions);
-  console.log("Size of ixs: ", ixsSize);
+  console.debug("Size of header: ", sizeHeader);
+  console.debug("Size of blockhash: ", sizeBlockhash);
+  console.debug("Size of signatures: ", sizeSignatures);
+  console.debug("Size of accounts: ", sizeAccounts);
+  console.debug("Size of number of instructions: ", sizeNInstructions);
+  console.debug("Size of ixs: ", ixsSize);
 
   return (
     sizeSignatures +
@@ -98,13 +102,17 @@ export const getVersionedTxSize = (
     );
   }, 0);
 
+  let ixNumber = -1;
+
   const ixsSize = tx.message.compiledInstructions.reduce((acc, ix) => {
     const nIndexes = ix.accountKeyIndexes.length;
     const opaqueData = ix.data.length;
 
-    console.log("n accounts in ix: ", nIndexes);
-    console.log("length of data in ix: ", opaqueData);
-    console.log("");
+    ixNumber += 1;
+
+    console.debug("ix number", ixNumber);
+    console.debug("n accounts in ix: ", nIndexes);
+    console.debug("length of data in ix: ", opaqueData);
     return (
       acc +
       1 + // PID index
@@ -123,13 +131,13 @@ export const getVersionedTxSize = (
     tx.message.compiledInstructions.length
   );
 
-  console.log("Size of header: ", sizeHeader);
-  console.log("Size of blockhash: ", sizeBlockhash);
-  console.log("Size of signatures: ", sizeSignatures);
-  console.log("Size of accounts: ", sizeAccounts);
-  console.log("Size of number of instructions: ", sizeNInstructions);
-  console.log("Size of ixs: ", ixsSize);
-  console.log("Size of lookup: ", lookupSize);
+  console.debug("Size of header: ", sizeHeader);
+  console.debug("Size of blockhash: ", sizeBlockhash);
+  console.debug("Size of signatures: ", sizeSignatures);
+  console.debug("Size of accounts: ", sizeAccounts);
+  console.debug("Size of number of instructions: ", sizeNInstructions);
+  console.debug("Size of ixs: ", ixsSize);
+  console.debug("Size of lookup: ", lookupSize);
 
   return (
     sizeSignatures +

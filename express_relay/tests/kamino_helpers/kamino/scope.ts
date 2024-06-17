@@ -8,7 +8,7 @@ export async function createScopeFeed(
 ): Promise<PublicKey> {
   const [txHash, { configuration, oraclePrices, oracleMappings }] =
     await scope.initialise(env.admin, env.testCase);
-  console.log(
+  console.debug(
     `Created scope feed ${
       env.testCase
     }, config: ${configuration.toBase58()}, prices: ${oraclePrices.toBase58()}, mappings: ${oracleMappings.toBase58()} with tx ${txHash}`

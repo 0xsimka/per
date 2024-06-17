@@ -28,7 +28,6 @@ pub mod express_relay {
         validate_fee_split(data.split_relayer)?;
 
         let express_relay_metadata_data = &mut ctx.accounts.express_relay_metadata.load_init()?;
-        // ctx.accounts.express_relay_metadata.bump = ctx.bumps.express_relay_metadata;
         express_relay_metadata_data.admin = *ctx.accounts.admin.key;
         express_relay_metadata_data.relayer_signer = *ctx.accounts.relayer_signer.key;
         express_relay_metadata_data.relayer_fee_receiver = *ctx.accounts.relayer_fee_receiver.key;
@@ -38,7 +37,7 @@ pub mod express_relay {
         Ok(())
     }
 
-    pub fn set_relayer(ctx: Context<SetRelayer>, _data: SetRelayerArgs) -> Result<()> {
+    pub fn set_relayer(ctx: Context<SetRelayer>) -> Result<()> {
         let express_relay_metadata_data = &mut ctx.accounts.express_relay_metadata.load_mut()?;
 
         express_relay_metadata_data.relayer_signer = *ctx.accounts.relayer_signer.key;
@@ -186,7 +185,7 @@ pub mod express_relay {
 
                     // check if the relayer token account data exists, if not create it and initialize it
                     if ta_relayer_acc.lamports() == 0 {
-                        // create the token_expectation_acc
+                        // create the relayer token account
                         let cpi_accounts_create_token_account = Create {
                             payer: relayer_signer.to_account_info().clone(),
                             associated_token: ta_relayer_acc.clone(),
@@ -229,7 +228,7 @@ pub mod express_relay {
                         mint_key.as_ref(),
                         &[bump_token_expectation]
                     ];
-                    let discriminator_token_expectation = Some(TokenExpectation::discriminator());
+                    let discriminator_token_expectation = TokenExpectation::discriminator();
                     create_pda(
                         token_expectation_acc.to_account_info(),
                         relayer_signer.to_account_info(),
@@ -237,7 +236,7 @@ pub mod express_relay {
                         seeds_token_expectation_with_bump,
                         ctx.program_id.key(),
                         RESERVE_TOKEN_EXPECTATION,
-                        discriminator_token_expectation
+                        Some(discriminator_token_expectation)
                     )?;
 
                     // check that the accounts in the later instruction match the accounts specified in this instruction
@@ -478,9 +477,6 @@ pub struct Initialize<'info> {
     pub relayer_fee_receiver: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
-
-#[derive(AnchorSerialize, AnchorDeserialize, Eq, PartialEq, Clone, Copy, Debug)]
-pub struct SetRelayerArgs {}
 
 #[derive(Accounts)]
 pub struct SetRelayer<'info> {

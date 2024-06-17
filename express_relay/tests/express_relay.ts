@@ -7,47 +7,29 @@ import {
   Token,
   TOKEN_PROGRAM_ID,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  // createMint,
-  // createAccount,
-  // getAccount,
-  // getOrCreateAssociatedTokenAccount,
-  // getAssociatedTokenAddress,
-  // transfer,
-  // approve,
-  // mintTo,
-  // TOKEN_PROGRAM_ID,
-  // ASSOCIATED_TOKEN_PROGRAM_ID,
-  // createWrappedNativeAccount,
-  // createSyncNativeInstruction,
 } from "@solana/spl-token";
 import {
   PublicKey,
-  AddressLookupTableProgram,
   TransactionMessage,
   VersionedTransaction,
   sendAndConfirmTransaction,
   Ed25519Program,
   TransactionInstruction,
-  AddressLookupTableAccount,
 } from "@solana/web3.js";
-import { assert, config } from "chai";
+import { assert } from "chai";
 import { getTxSize, getVersionedTxSize } from "./helpers/size_tx";
-import { waitForNewBlock } from "./helpers/sleep";
+import { createSignature } from "./helpers/signature";
+import { convertUint8ArrayNumberArray } from "./helpers/numberArray";
 import {
-  convertWordArrayToBuffer,
-  convertWordArrayToBufferOld,
-  wordArrayToByteArray,
-  fromWordArray,
-} from "./helpers/word_array";
-import { sign } from "@noble/ed25519";
-import * as crypto from "crypto";
+  writeKeypairToFile,
+  readKeypairFromFile,
+} from "./helpers/keypairUtils";
+import * as fs from "fs";
+import { setLogLevel, LogLevel } from "./helpers/console";
 
 import {
-  KaminoAction,
-  KaminoObligation,
-  VanillaObligation,
   WRAPPED_SOL_MINT,
-  idl as klendIdl,
+  getTokenAccountBalance,
 } from "@kamino-finance/klend-sdk";
 import { setupMarketWithLoan } from "./kamino_helpers/fixtures";
 import { Env } from "./kamino_helpers/types";
@@ -57,19 +39,34 @@ import {
   updatePrice,
   reloadReservesAndRefreshMarket,
 } from "./kamino_helpers/operations";
-import { toLamports } from "./kamino_helpers/utils";
+import {
+  constructAndSendVersionedTransaction,
+  sendAndConfirmVersionedTransaction,
+  toLamports,
+} from "./kamino_helpers/utils";
 import { Price } from "./kamino_helpers/price";
 import {
   getLiquidationLookupTables,
   getMarketAccounts,
   liquidateAndRedeem,
 } from "./kamino_helpers/liquidate";
-import {
-  checkLiquidate,
-  tryLiquidateObligation,
-} from "./kamino_helpers/tryLiquidate";
 import { createAndPopulateLookupTable } from "./helpers/lookupTable";
 import { initializeFarmsForReserve } from "./kamino_helpers/kamino/initFarms";
+import { constructExpressRelayTransaction } from "./helpers/expressRelayTransaction";
+import { constructAndSendEzLendLiquidateTransaction } from "./helpers/ezLendTransaction";
+
+// args
+// set log-level to "debug" to see all logs; set to "log" or "error" to see only subset
+// set kamino-elim-ixs to "none" to include all Kamino ixs; set to "initFarm" to eliminate all initFarm ixs; set to "farm" to eliminate all farm ixs
+const args = process.argv.slice(7);
+const indexLogLevel = args.indexOf("--log-level") + 1;
+const indexKaminoElimIxs = args.indexOf("--kamino-elim-ixs") + 1;
+const logLevel = args[indexLogLevel] as LogLevel;
+const kaminoElimIxs = args[indexKaminoElimIxs];
+
+global.logLevel = logLevel;
+
+setLogLevel();
 
 describe("express_relay", () => {
   // Configure the client to use the local cluster.
@@ -80,24 +77,30 @@ describe("express_relay", () => {
   const klendProgramId = new PublicKey(
     "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
   );
-  // const klendProgramId = new PublicKey("3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb");
-
-  // tx config
-  const protocolLiquidate: string = "kamino"; // 'ezlend'
-  const omitOpportunityAdapter: boolean = false;
-  const elimIxs: string = "none";
 
   const provider = anchor.AnchorProvider.local();
   const LAMPORTS_PER_SOL = 1000000000;
-  const payer = anchor.web3.Keypair.generate();
+  const searcher = anchor.web3.Keypair.generate();
   const mintCollateralAuthority = anchor.web3.Keypair.generate();
   const mintDebtAuthority = anchor.web3.Keypair.generate();
+
+  // ezLend vault params
+  let vaultIdEzLend1;
+  let vaultIdEzLend1Seed;
+  let vaultIdEzLend2;
+  let vaultIdEzLend2Seed;
+  let vaultEzLend1;
+  let vaultEzLend2;
+  let permissionEzLend1;
+  let permissionEzLend2;
+  const collateralAmountEzLend = new anchor.BN(100);
+  const debtAmountEzLend = new anchor.BN(50);
 
   let mintCollateral;
   let mintDebt;
 
-  let ataCollateralPayer;
-  let ataDebtPayer;
+  let ataCollateralSearcher;
+  let ataDebtSearcher;
 
   let ataCollateralRelayer;
   let ataDebtRelayer;
@@ -105,58 +108,106 @@ describe("express_relay", () => {
   let taCollateralProtocol;
   let taDebtProtocol;
 
-  let expressRelayAuthority;
+  const expressRelayAuthority = PublicKey.findProgramAddressSync(
+    [anchor.utils.bytes.utf8.encode("authority")],
+    expressRelay.programId
+  );
 
-  let protocol = ezLend.programId;
-  let protocolFeeReceiver;
+  let ezLendFeeReceiver;
 
-  const relayerSigner = anchor.web3.Keypair.generate();
-  const relayerFeeReceiver = anchor.web3.Keypair.generate();
-  const relayerRentReceiver = anchor.web3.Keypair.generate();
-  const admin = anchor.web3.Keypair.generate();
+  const tokenWsol = new Token(
+    provider.connection,
+    WRAPPED_SOL_MINT,
+    TOKEN_PROGRAM_ID,
+    searcher
+  );
+  const wsolTaExpressRelay = PublicKey.findProgramAddressSync(
+    [anchor.utils.bytes.utf8.encode("ata"), WRAPPED_SOL_MINT.toBuffer()],
+    expressRelay.programId
+  );
+  let wsolTaSearcher;
 
-  let wsolTaUser;
-  let wsolTaExpressRelay;
-
-  let expressRelayMetadata;
+  const expressRelayMetadata = PublicKey.findProgramAddressSync(
+    [anchor.utils.bytes.utf8.encode("metadata")],
+    expressRelay.programId
+  );
   let splitProtocolDefault = new anchor.BN(5000);
   let splitRelayer = new anchor.BN(2000);
 
   const env: Env = {
     provider: provider,
     programId: klendProgramId,
-    admin: payer,
-    wallet: new anchor.Wallet(payer),
+    admin: searcher,
+    wallet: new anchor.Wallet(searcher),
     testCase: `${Date.now().toString()}-${
       Math.floor(Math.random() * 1000000) + 1
     }`,
   };
 
-  let kaminoMarket;
-  let obligation;
-  let liquidatorPath;
-  let liquidator;
-  let kaminoLiquidator: anchor.web3.Keypair;
-
-  let obligPre;
-  let obligPost;
+  let oblig;
   let configLiquidation;
 
   let ixsKaminoLiq;
   let kaminoLiquidationLookupTables;
 
-  console.log("payer: ", payer.publicKey.toBase58());
-  console.log("relayerSigner: ", relayerSigner.publicKey.toBase58());
-  console.log("relayerFeeReceiver: ", relayerFeeReceiver.publicKey.toBase58());
-  console.log("admin: ", admin.publicKey.toBase58());
+  let kaminoMarketVar;
+  let obligationVar;
+  let liquidatorPathVar;
+  let liquidatorVar;
 
-  // set up mints, tokens, token accounts, approvals; initialize express relay
+  let relayerSigner;
+  let relayerFeeReceiver;
+  let admin;
+
+  // get relayer and admin keypairs
   before(async () => {
-    let airdrop_signature_payer = await provider.connection.requestAirdrop(
-      payer.publicKey,
+    if (!fs.existsSync("tests/keys/relayerSigner.json")) {
+      relayerSigner = anchor.web3.Keypair.generate();
+      await writeKeypairToFile(
+        relayerSigner.secretKey,
+        "tests/keys/relayerSigner.json"
+      );
+    } else {
+      relayerSigner = await readKeypairFromFile(
+        "tests/keys/relayerSigner.json"
+      );
+    }
+
+    if (!fs.existsSync("tests/keys/relayerFeeReceiver.json")) {
+      relayerFeeReceiver = anchor.web3.Keypair.generate();
+      await writeKeypairToFile(
+        relayerFeeReceiver.secretKey,
+        "tests/keys/relayerFeeReceiver.json"
+      );
+    } else {
+      relayerFeeReceiver = await readKeypairFromFile(
+        "tests/keys/relayerFeeReceiver.json"
+      );
+    }
+
+    if (!fs.existsSync("tests/keys/admin.json")) {
+      admin = anchor.web3.Keypair.generate();
+      await writeKeypairToFile(admin.secretKey, "tests/keys/admin.json");
+    } else {
+      admin = await readKeypairFromFile("tests/keys/admin.json");
+    }
+
+    console.log("searcher: ", searcher.publicKey.toBase58());
+    console.log("relayerSigner: ", relayerSigner.publicKey.toBase58());
+    console.log(
+      "relayerFeeReceiver: ",
+      relayerFeeReceiver.publicKey.toBase58()
+    );
+    console.log("admin: ", admin.publicKey.toBase58());
+  });
+
+  // fund wallets
+  before(async () => {
+    let airdropSignatureSearcher = await provider.connection.requestAirdrop(
+      searcher.publicKey,
       20 * LAMPORTS_PER_SOL
     );
-    await provider.connection.confirmTransaction(airdrop_signature_payer);
+    await provider.connection.confirmTransaction(airdropSignatureSearcher);
 
     let airdrop_signature_relayer_signer =
       await provider.connection.requestAirdrop(
@@ -166,11 +217,40 @@ describe("express_relay", () => {
     await provider.connection.confirmTransaction(
       airdrop_signature_relayer_signer
     );
+  });
 
+  // initialize express relay
+  before(async () => {
+    const balanceExpressRelayMetadata = await provider.connection.getBalance(
+      expressRelayMetadata[0]
+    );
+    if (balanceExpressRelayMetadata === 0) {
+      await expressRelay.methods
+        .initialize({
+          splitProtocolDefault: splitProtocolDefault,
+          splitRelayer: splitRelayer,
+        })
+        .accountsPartial({
+          payer: relayerSigner.publicKey,
+          expressRelayMetadata: expressRelayMetadata[0],
+          admin: admin.publicKey,
+          relayerSigner: relayerSigner.publicKey,
+          relayerFeeReceiver: relayerFeeReceiver.publicKey,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([relayerSigner])
+        .rpc();
+    } else {
+      console.debug("Express Relay already initialized");
+    }
+  });
+
+  // set up EzLend--mints, tokens, token accounts, approvals
+  before(async () => {
     // create mints
     mintCollateral = await Token.createMint(
       provider.connection,
-      payer,
+      searcher,
       mintCollateralAuthority.publicKey,
       mintCollateralAuthority.publicKey,
       9,
@@ -178,50 +258,39 @@ describe("express_relay", () => {
     );
     mintDebt = await Token.createMint(
       provider.connection,
-      payer,
+      searcher,
       mintDebtAuthority.publicKey,
       mintDebtAuthority.publicKey,
       9,
       TOKEN_PROGRAM_ID
     );
 
-    protocolFeeReceiver = await PublicKey.findProgramAddressSync(
+    ezLendFeeReceiver = PublicKey.findProgramAddressSync(
       [anchor.utils.bytes.utf8.encode("express_relay_fees")],
-      protocol
+      ezLend.programId
     );
 
     const tokenCollateral = new Token(
       provider.connection,
       mintCollateral.publicKey,
       TOKEN_PROGRAM_ID,
-      payer
+      searcher
     );
     const tokenDebt = new Token(
       provider.connection,
       mintDebt.publicKey,
       TOKEN_PROGRAM_ID,
-      payer
+      searcher
     );
 
     // Initialize TAs
-    ataCollateralPayer = await tokenCollateral.getOrCreateAssociatedAccountInfo(
-      payer.publicKey
+    ataCollateralSearcher =
+      await tokenCollateral.getOrCreateAssociatedAccountInfo(
+        searcher.publicKey
+      );
+    ataDebtSearcher = await tokenDebt.getOrCreateAssociatedAccountInfo(
+      searcher.publicKey
     );
-    ataDebtPayer = await tokenDebt.getOrCreateAssociatedAccountInfo(
-      payer.publicKey
-    );
-    // ataCollateralPayer = await getOrCreateAssociatedTokenAccount(
-    //   provider.connection,
-    //   payer,
-    //   mintCollateral,
-    //   payer.publicKey
-    // );
-    // ataDebtPayer = await getOrCreateAssociatedTokenAccount(
-    //   provider.connection,
-    //   payer,
-    //   mintDebt,
-    //   payer.publicKey
-    // );
     ataCollateralRelayer = await Token.getAssociatedTokenAddress(
       ASSOCIATED_TOKEN_PROGRAM_ID,
       TOKEN_PROGRAM_ID,
@@ -234,217 +303,255 @@ describe("express_relay", () => {
       mintDebt.publicKey,
       relayerSigner.publicKey
     );
-    taCollateralProtocol = await PublicKey.findProgramAddressSync(
+    taCollateralProtocol = PublicKey.findProgramAddressSync(
       [
         anchor.utils.bytes.utf8.encode("ata"),
         mintCollateral.publicKey.toBuffer(),
       ],
-      protocol
+      ezLend.programId
     );
-    taDebtProtocol = await PublicKey.findProgramAddressSync(
+    taDebtProtocol = PublicKey.findProgramAddressSync(
       [anchor.utils.bytes.utf8.encode("ata"), mintDebt.publicKey.toBuffer()],
-      protocol
+      ezLend.programId
     );
 
-    expressRelayAuthority = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("authority")],
-      expressRelay.programId
+    wsolTaSearcher = await tokenWsol.getOrCreateAssociatedAccountInfo(
+      searcher.publicKey
     );
-
-    const tokenWsol = new Token(
-      provider.connection,
-      WRAPPED_SOL_MINT,
-      TOKEN_PROGRAM_ID,
-      payer
-    );
-    wsolTaUser = await tokenWsol.getOrCreateAssociatedAccountInfo(
-      payer.publicKey
-    );
-    // wsolTaUser = await getOrCreateAssociatedTokenAccount(
-    //   provider.connection,
-    //   payer,
-    //   WRAPPED_SOL_MINT,
-    //   payer.publicKey
-    // );
-    const fundWsolTaUserTx = new anchor.web3.Transaction().add(
+    const fundWsolTaSearcherTx = new anchor.web3.Transaction().add(
       anchor.web3.SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: wsolTaUser.address,
+        fromPubkey: searcher.publicKey,
+        toPubkey: wsolTaSearcher.address,
         lamports: 5 * LAMPORTS_PER_SOL,
       }),
       new TransactionInstruction({
         keys: [
-          { pubkey: wsolTaUser.address, isSigner: false, isWritable: true },
+          { pubkey: wsolTaSearcher.address, isSigner: false, isWritable: true },
         ],
         data: Buffer.from(new Uint8Array([17])),
         programId: TOKEN_PROGRAM_ID,
       })
-      // createSyncNativeInstruction(wsolTaUser.address)
     );
-    await provider.connection.sendTransaction(fundWsolTaUserTx, [payer]);
+    await provider.connection.sendTransaction(fundWsolTaSearcherTx, [searcher]);
     await tokenWsol.approve(
-      wsolTaUser.address,
+      wsolTaSearcher.address,
       expressRelayAuthority[0],
-      payer,
+      searcher,
       [],
       5 * LAMPORTS_PER_SOL
     );
-    // await approve(
-    //   provider.connection,
-    //   payer,
-    //   wsolTaUser.address,
-    //   expressRelayAuthority[0],
-    //   payer.publicKey,
-    //   5 * LAMPORTS_PER_SOL
-    // );
 
-    wsolTaExpressRelay = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("ata"), WRAPPED_SOL_MINT.toBuffer()],
-      expressRelay.programId
-    );
-
-    expressRelayMetadata = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("metadata")],
-      expressRelay.programId
-    );
-
-    const tx_collateral_ta = await ezLend.methods
+    // create protocol collateral ATA via EzLend method
+    await ezLend.methods
       .createTokenAcc({})
-      .accounts({
-        payer: payer.publicKey,
+      .accountsPartial({
+        payer: searcher.publicKey,
         mint: mintCollateral.publicKey,
         tokenAccount: taCollateralProtocol[0],
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: anchor.web3.SystemProgram.programId,
       })
-      .signers([payer])
+      .signers([searcher])
       .rpc();
 
-    const tx_debt_ta = await ezLend.methods
-      .createTokenAcc({})
-      .accounts({
-        payer: payer.publicKey,
-        mint: mintDebt.publicKey,
-        tokenAccount: taDebtProtocol[0],
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([payer])
-      .rpc();
+    // create protocol ATAs via EzLend method if needed
+    let balanceTaDebtProtocol = await provider.connection.getBalance(
+      taDebtProtocol[0]
+    );
+    let balanceTaCollateralProtocol = await provider.connection.getBalance(
+      taCollateralProtocol[0]
+    );
 
-    // (collateral, payer)
+    if (balanceTaDebtProtocol === 0) {
+      await ezLend.methods
+        .createTokenAcc({})
+        .accountsPartial({
+          payer: searcher.publicKey,
+          mint: mintDebt.publicKey,
+          tokenAccount: taDebtProtocol[0],
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([searcher])
+        .rpc();
+    }
+    if (balanceTaCollateralProtocol === 0) {
+      await ezLend.methods
+        .createTokenAcc({})
+        .accountsPartial({
+          payer: searcher.publicKey,
+          mint: mintCollateral.publicKey,
+          tokenAccount: taCollateralProtocol[0],
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([searcher])
+        .rpc();
+    }
+
+    // increment vaultIdEzLend1 until uninitialized vault
+    vaultIdEzLend1 = null;
+    let balanceVault = null;
+    while (balanceVault != 0) {
+      if (vaultIdEzLend1 === null) {
+        vaultIdEzLend1 = new anchor.BN(0);
+      } else {
+        vaultIdEzLend1 = vaultIdEzLend1.add(new anchor.BN(1));
+      }
+      vaultIdEzLend1Seed = new Uint8Array(32);
+      vaultIdEzLend1Seed.set(vaultIdEzLend1.toArrayLike(Buffer, "le", 32), 0);
+
+      vaultEzLend1 = PublicKey.findProgramAddressSync(
+        [anchor.utils.bytes.utf8.encode("vault"), vaultIdEzLend1Seed],
+        ezLend.programId
+      )[0];
+      balanceVault = await provider.connection.getBalance(vaultEzLend1);
+    }
+
+    vaultIdEzLend2 = vaultIdEzLend1.add(new anchor.BN(1));
+    vaultIdEzLend2Seed = new Uint8Array(32);
+    vaultIdEzLend2Seed.set(vaultIdEzLend2.toArrayLike(Buffer, "le", 32), 0);
+    vaultEzLend2 = PublicKey.findProgramAddressSync(
+      [anchor.utils.bytes.utf8.encode("vault"), vaultIdEzLend2Seed],
+      ezLend.programId
+    )[0];
+
+    permissionEzLend1 = PublicKey.findProgramAddressSync(
+      [
+        anchor.utils.bytes.utf8.encode("permission"),
+        ezLend.programId.toBuffer(),
+        vaultIdEzLend1Seed,
+      ],
+      expressRelay.programId
+    )[0];
+    permissionEzLend2 = PublicKey.findProgramAddressSync(
+      [
+        anchor.utils.bytes.utf8.encode("permission"),
+        ezLend.programId.toBuffer(),
+        vaultIdEzLend2Seed,
+      ],
+      expressRelay.programId
+    )[0];
+
+    // mint (collateral, searcher)
     await tokenCollateral.mintTo(
-      ataCollateralPayer.address,
+      ataCollateralSearcher.address,
       mintCollateralAuthority,
       [],
       1000
     );
-
-    // await mintTo(
-    //   provider.connection,
-    //   payer,
-    //   mintCollateral,
-    //   ataCollateralPayer.address,
-    //   mintCollateralAuthority,
-    //   1000,
-    //   [],
-    //   undefined,
-    //   TOKEN_PROGRAM_ID
-    // );
-    // (debt, payer)
-    await tokenDebt.mintTo(ataDebtPayer.address, mintDebtAuthority, [], 1000);
-
-    // await mintTo(
-    //   provider.connection,
-    //   payer,
-    //   mintDebt.publicKey,
-    //   ataDebtPayer.address,
-    //   mintDebt.publicKeyAuthority,
-    //   1000,
-    //   [],
-    //   undefined,
-    //   TOKEN_PROGRAM_ID
-    // );
-
-    // (collateral, protocol)
+    // mint (debt, searcher)
+    await tokenDebt.mintTo(
+      ataDebtSearcher.address,
+      mintDebtAuthority,
+      [],
+      1000
+    );
+    // mint (collateral, protocol)
     await tokenCollateral.mintTo(
       taCollateralProtocol[0],
       mintCollateralAuthority,
       [],
       10000
     );
-    // await mintTo(
-    //   provider.connection,
-    //   payer,
-    //   mintCollateral,
-    //   taCollateralProtocol[0],
-    //   mintCollateralAuthority,
-    //   10000,
-    //   [],
-    //   undefined,
-    //   TOKEN_PROGRAM_ID
-    // );
-    // (debt, protocol)
+    // mint (debt, protocol)
     await tokenDebt.mintTo(taDebtProtocol[0], mintDebtAuthority, [], 10000);
-    // await mintTo(
-    //   provider.connection,
-    //   payer,
-    //   mintDebt.publicKey,
-    //   taDebtProtocol[0],
-    //   mintDebt.publicKeyAuthority,
-    //   10000,
-    //   [],
-    //   undefined,
-    //   TOKEN_PROGRAM_ID
-    // );
 
-    // approve user's tokens to express relay
+    // approve searcher's tokens to express relay
     await tokenCollateral.approve(
-      ataCollateralPayer.address,
+      ataCollateralSearcher.address,
       expressRelayAuthority[0],
-      payer,
+      searcher,
       [],
       1000
     );
-    // await approve(
-    //   provider.connection,
-    //   payer,
-    //   ataCollateralPayer.address,
-    //   expressRelayAuthority[0],
-    //   payer.publicKey,
-    //   1000
-    // );
     await tokenDebt.approve(
-      ataDebtPayer.address,
+      ataDebtSearcher.address,
       expressRelayAuthority[0],
-      payer,
+      searcher,
       [],
       10000
     );
-    // await approve(
-    //   provider.connection,
-    //   payer,
-    //   ataDebtPayer.address,
-    //   expressRelayAuthority[0],
-    //   payer.publicKey,
-    //   10000
-    // );
 
-    await expressRelay.methods
-      .initialize({
-        splitProtocolDefault: splitProtocolDefault,
-        splitRelayer: splitRelayer,
-      })
-      .accounts({
-        payer: relayerSigner.publicKey,
-        expressRelayMetadata: expressRelayMetadata[0],
-        admin: admin.publicKey,
-        relayerSigner: relayerSigner.publicKey,
-        relayerFeeReceiver: relayerFeeReceiver.publicKey,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([relayerSigner])
-      .rpc();
+    let vaults = [
+      { vaultId: vaultIdEzLend1, vault: vaultEzLend1 },
+      { vaultId: vaultIdEzLend2, vault: vaultEzLend2 },
+    ];
+    // create vaults
+    for (let vault of vaults) {
+      // get token balances pre
+      let balanceCollateralSearcherPre = await getTokenAccountBalance(
+        provider,
+        ataCollateralSearcher.address
+      );
+      let balanceDebtSearcherPre = await getTokenAccountBalance(
+        provider,
+        ataDebtSearcher.address
+      );
+      let balanceCollateralProtocolPre = await getTokenAccountBalance(
+        provider,
+        taCollateralProtocol[0]
+      );
+      let balanceDebtProtocolPre = await getTokenAccountBalance(
+        provider,
+        taDebtProtocol[0]
+      );
+
+      await ezLend.methods
+        .createVault({
+          vaultId: vault.vaultId.toArrayLike(Buffer, "le", 32),
+          collateralAmount: collateralAmountEzLend,
+          debtAmount: debtAmountEzLend,
+        })
+        .accountsPartial({
+          vault: vault.vault,
+          payer: searcher.publicKey,
+          collateralMint: mintCollateral.publicKey,
+          debtMint: mintDebt.publicKey,
+          collateralAtaPayer: ataCollateralSearcher.address,
+          collateralTaProgram: taCollateralProtocol[0],
+          debtAtaPayer: ataDebtSearcher.address,
+          debtTaProgram: taDebtProtocol[0],
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([searcher])
+        .rpc();
+
+      let balanceCollateralSearcherPost = await getTokenAccountBalance(
+        provider,
+        ataCollateralSearcher.address
+      );
+      let balanceDebtSearcherPost = await getTokenAccountBalance(
+        provider,
+        ataDebtSearcher.address
+      );
+      let balanceCollateralProtocolPost = await getTokenAccountBalance(
+        provider,
+        taCollateralProtocol[0]
+      );
+      let balanceDebtProtocolPost = await getTokenAccountBalance(
+        provider,
+        taDebtProtocol[0]
+      );
+
+      assert(
+        balanceCollateralSearcherPre - balanceCollateralSearcherPost ===
+          collateralAmountEzLend.toNumber()
+      );
+      assert(
+        balanceDebtSearcherPost - balanceDebtSearcherPre ===
+          debtAmountEzLend.toNumber()
+      );
+      assert(
+        balanceCollateralProtocolPost - balanceCollateralProtocolPre ===
+          collateralAmountEzLend.toNumber()
+      );
+      assert(
+        balanceDebtProtocolPre - balanceDebtProtocolPost ===
+          debtAmountEzLend.toNumber()
+      );
+    }
   });
 
   // set up klend market and obligation, undercollateralize by pulling price down
@@ -498,17 +605,6 @@ describe("express_relay", () => {
       configLiquidation,
       []
     );
-    let { reserveAutodeleverageStatus } = marketAccs;
-
-    obligPre = await kaminoMarket.getObligationByAddress(obligation);
-
-    let liquidationScenarioPre = tryLiquidateObligation(
-      kaminoMarket,
-      reserveAutodeleverageStatus,
-      obligPre,
-      new Decimal("1")
-    );
-    console.log("LIQUIDATION SCENARIO PRE: ", liquidationScenarioPre);
 
     // give the liquidator enough USDC to not need to flash borrow
     await mintToUser(
@@ -528,645 +624,242 @@ describe("express_relay", () => {
     );
     await reloadReservesAndRefreshMarket(env, kaminoMarket);
 
-    console.log("kaminoMarket: ", kaminoMarket);
-    console.log("obligation: ", obligation);
-    console.log("liquidatorPath: ", liquidatorPath);
-    console.log("liquidator: ", liquidator);
-    console.log("GOT THROUGH THE KAMINO SETUP");
+    oblig = await kaminoMarket.getObligationByAddress(obligation);
 
-    obligPost = await kaminoMarket.getObligationByAddress(obligation);
+    kaminoMarketVar = kaminoMarket;
+    obligationVar = oblig;
+    liquidatorPathVar = liquidatorPath;
+    liquidatorVar = liquidator;
+  });
 
-    let runCheckPost = checkLiquidate(
-      kaminoMarket,
-      obligPost,
-      new Decimal("1")
-    );
-    console.log(runCheckPost);
-    let liquidationScenarioPost = tryLiquidateObligation(
-      kaminoMarket,
-      reserveAutodeleverageStatus,
-      obligPost,
-      new Decimal("1")
-    );
-    //   console.log("LIQUIDATION SCENARIO Post: ", liquidationScenarioPost);
-    // });
+  it("Empty Express Relay transaction (for sizing)", async () => {
+    let permissionIdEmpty = new Uint8Array(32);
+    let validUntilEmpty = new anchor.BN(200_000_000_000);
+    let bidAmountEmpty = new anchor.BN(0);
+    let protocolEmpty = new PublicKey(0);
 
-    // it("Liquidate the Kamino obligation", async () => {
+    let tokenAmounts = {
+      sellTokens: [
+        {
+          mint: mintCollateral.publicKey,
+          amount: new anchor.BN(0),
+        },
+      ],
+      buyTokens: [
+        {
+          mint: mintDebt.publicKey,
+          amount: new anchor.BN(0),
+        },
+      ],
+    };
+
+    for (let opportunityAdapter of [true, false]) {
+      if (opportunityAdapter) {
+        console.log(
+          "Constructing the empty transaction with OpportunityAdapter"
+        );
+      } else {
+        console.log(
+          "Constructing the empty transaction without OpportunityAdapter"
+        );
+      }
+      let txExpressRelayEmpty = await constructExpressRelayTransaction(
+        provider.connection,
+        expressRelay,
+        relayerSigner,
+        relayerFeeReceiver,
+        searcher,
+        protocolEmpty,
+        permissionIdEmpty,
+        bidAmountEmpty,
+        validUntilEmpty,
+        [],
+        tokenAmounts,
+        opportunityAdapter
+      );
+      await sendAndConfirmVersionedTransaction(
+        provider.connection,
+        txExpressRelayEmpty
+      );
+    }
+  });
+
+  it("EzLend liquidation (with/without Opportunity Adapter)", async () => {
+    let bidAmount = new anchor.BN(100_000_000);
+    let validUntil = new anchor.BN(200_000_000_000_000);
+
+    let opportunityAdapterSettingsList = [
+      {
+        opportunityAdapter: false,
+        vaultEzLend: vaultEzLend1,
+        vaultIdEzLend: vaultIdEzLend1,
+        permissionEzLend: permissionEzLend1,
+      },
+      {
+        opportunityAdapter: true,
+        vaultEzLend: vaultEzLend2,
+        vaultIdEzLend: vaultIdEzLend2,
+        permissionEzLend: permissionEzLend2,
+      },
+    ];
+
+    // let opportunityAdapterSettings = opportunityAdapterSettingsList[1];
+    for (let opportunityAdapterSettings of opportunityAdapterSettingsList) {
+      let vaultEzLend = opportunityAdapterSettings.vaultEzLend;
+      let vaultIdEzLend = opportunityAdapterSettings.vaultIdEzLend;
+      let permissionEzLend = opportunityAdapterSettings.permissionEzLend;
+      let opportunityAdapter = opportunityAdapterSettings.opportunityAdapter;
+
+      // get token balances pre liquidation
+      let balanceCollateralSearcherPre = await getTokenAccountBalance(
+        provider,
+        ataCollateralSearcher.address
+      );
+      let balanceDebtSearcherPre = await getTokenAccountBalance(
+        provider,
+        ataDebtSearcher.address
+      );
+      let balanceCollateralProtocolPre = await getTokenAccountBalance(
+        provider,
+        taCollateralProtocol[0]
+      );
+      let balanceDebtProtocolPre = await getTokenAccountBalance(
+        provider,
+        taDebtProtocol[0]
+      );
+
+      let txResponse = await constructAndSendEzLendLiquidateTransaction(
+        provider.connection,
+        relayerSigner,
+        relayerFeeReceiver,
+        vaultEzLend,
+        vaultIdEzLend,
+        permissionEzLend,
+        searcher,
+        {
+          mint: mintCollateral.publicKey,
+          ataSearcher: ataCollateralSearcher.address,
+          ataRelayer: ataCollateralRelayer,
+          taProtocol: taCollateralProtocol[0],
+          amount: collateralAmountEzLend,
+        },
+        {
+          mint: mintDebt.publicKey,
+          ataSearcher: ataDebtSearcher.address,
+          ataRelayer: ataDebtRelayer,
+          taProtocol: taDebtProtocol[0],
+          amount: debtAmountEzLend,
+        },
+        ezLend,
+        expressRelay,
+        bidAmount,
+        validUntil,
+        opportunityAdapter
+      );
+
+      // get token balances post liquidation
+      let balanceCollateralSearcherPost = await getTokenAccountBalance(
+        provider,
+        ataCollateralSearcher.address
+      );
+      let balanceDebtSearcherPost = await getTokenAccountBalance(
+        provider,
+        ataDebtSearcher.address
+      );
+      let balanceCollateralProtocolPost = await getTokenAccountBalance(
+        provider,
+        taCollateralProtocol[0]
+      );
+      let balanceDebtProtocolPost = await getTokenAccountBalance(
+        provider,
+        taDebtProtocol[0]
+      );
+
+      assert(
+        balanceCollateralSearcherPost - balanceCollateralSearcherPre ===
+          collateralAmountEzLend.toNumber()
+      );
+      assert(
+        balanceDebtSearcherPre - balanceDebtSearcherPost ===
+          debtAmountEzLend.toNumber()
+      );
+      assert(
+        balanceCollateralProtocolPre - balanceCollateralProtocolPost ===
+          collateralAmountEzLend.toNumber()
+      );
+      assert(
+        balanceDebtProtocolPost - balanceDebtProtocolPre ===
+          debtAmountEzLend.toNumber()
+      );
+    }
+  });
+
+  it("Kamino liquidation (with/without Opportunity Adapter)", async () => {
+    let permissionIdEmpty = new Uint8Array(32);
+    let validUntilEmpty = new anchor.BN(200_000_000_000);
+    let bidAmountEmpty = new anchor.BN(0);
+    let protocolEmpty = new PublicKey(0);
+
+    // create kamino liquidation instruction, kaminoElimIxs toggles which instructions to remove from Kamino result
     let liquidationAmount: number = 4;
     ixsKaminoLiq = await liquidateAndRedeem(
-      kaminoMarket,
-      liquidator,
+      kaminoMarketVar,
+      liquidatorVar,
       liquidationAmount,
-      kaminoMarket.getReserveBySymbol("SOL"),
-      kaminoMarket.getReserveBySymbol("USDC"),
-      obligPost,
+      kaminoMarketVar.getReserveBySymbol("SOL"),
+      kaminoMarketVar.getReserveBySymbol("USDC"),
+      oblig,
       configLiquidation,
-      elimIxs
+      kaminoElimIxs
     );
-
-    kaminoLiquidator = liquidator;
 
     kaminoLiquidationLookupTables = await getLiquidationLookupTables(
       provider.connection,
       klendProgramId,
-      new PublicKey(kaminoMarket.address),
-      liquidator
-    );
-  });
-
-  it("Create and liquidate vault", async () => {
-    let vault_id_BN = new anchor.BN(0);
-    let collateral_amount = new anchor.BN(100);
-    let debt_amount = new anchor.BN(50);
-
-    // get token balances pre
-    let balance_collateral_payer_0 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          ataCollateralPayer.address
-        )
-      ).value.amount
-    );
-    let balance_debt_payer_0 = Number(
-      (await provider.connection.getTokenAccountBalance(ataDebtPayer.address))
-        .value.amount
-    );
-    let balance_collateral_protocol_0 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          taCollateralProtocol[0]
-        )
-      ).value.amount
-    );
-    let balance_debt_protocol_0 = Number(
-      (await provider.connection.getTokenAccountBalance(taDebtProtocol[0]))
-        .value.amount
+      new PublicKey(kaminoMarketVar.address),
+      liquidatorVar
     );
 
-    // convert the vault id to a bytearray
-    let vault_id_bytes = new Uint8Array(32);
-    vault_id_bytes.set(vault_id_BN.toArrayLike(Buffer, "le", 32), 0);
-    let vault = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("vault"), vault_id_bytes],
-      protocol
-    );
-
-    const tx_create_vault = await ezLend.methods
-      .createVault({
-        vaultId: vault_id_bytes,
-        collateralAmount: collateral_amount,
-        debtAmount: debt_amount,
-      })
-      .accounts({
-        vault: vault[0],
-        payer: payer.publicKey,
-        collateralMint: mintCollateral.publicKey,
-        debtMint: mintDebt.publicKey,
-        collateralAtaPayer: ataCollateralPayer.address,
-        collateralTaProgram: taCollateralProtocol[0],
-        debtAtaPayer: ataDebtPayer.address,
-        debtTaProgram: taDebtProtocol[0],
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([payer])
-      .rpc();
-
-    // get token balances post creation
-    let balance_collateral_payer_1 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          ataCollateralPayer.address
-        )
-      ).value.amount
-    );
-    let balance_debt_payer_1 = Number(
-      (await provider.connection.getTokenAccountBalance(ataDebtPayer.address))
-        .value.amount
-    );
-    let balance_collateral_protocol_1 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          taCollateralProtocol[0]
-        )
-      ).value.amount
-    );
-    let balance_debt_protocol_1 = Number(
-      (await provider.connection.getTokenAccountBalance(taDebtProtocol[0]))
-        .value.amount
-    );
-
-    let permission = await PublicKey.findProgramAddressSync(
-      [
-        anchor.utils.bytes.utf8.encode("permission"),
-        protocol.toBuffer(),
-        vault_id_bytes,
+    let tokenAmounts = {
+      sellTokens: [
+        {
+          mint: mintCollateral.publicKey,
+          amount: new anchor.BN(0),
+        },
       ],
-      expressRelay.programId
-    );
-
-    let collateralAtaPayer;
-    let debtAtaPayer;
-    let liquidatorEzLend;
-    if (omitOpportunityAdapter) {
-      liquidatorEzLend = payer;
-      collateralAtaPayer = ataCollateralPayer.address;
-      debtAtaPayer = ataDebtPayer.address;
-    } else {
-      liquidatorEzLend = relayerSigner;
-      collateralAtaPayer = ataCollateralRelayer;
-      debtAtaPayer = ataDebtRelayer;
-    }
-
-    const ixLiquidate = await ezLend.methods
-      .liquidate({
-        vaultId: vault_id_bytes,
-      })
-      .accounts({
-        vault: vault[0],
-        payer: liquidatorEzLend.publicKey,
-        // payer: payer.publicKey,
-        collateralMint: mintCollateral.publicKey,
-        debtMint: mintDebt.publicKey,
-        collateralAtaPayer: collateralAtaPayer,
-        // collateralAtaPayer: ataCollateralPayer.address,
-        collateralTaProgram: taCollateralProtocol[0],
-        debtAtaPayer: debtAtaPayer,
-        // debtAtaPayer: ataDebtPayer.address,
-        debtTaProgram: taDebtProtocol[0],
-        permission: permission[0],
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([liquidatorEzLend])
-      .instruction();
-
-    let bidId: Uint8Array = new Uint8Array(16);
-    let bidAmount = new anchor.BN(100_000_000);
-
-    let protocolConfig = await PublicKey.findProgramAddressSync(
-      [anchor.utils.bytes.utf8.encode("config_protocol"), protocol.toBuffer()],
-      expressRelay.programId
-    );
-
-    const validUntilExpressRelay = new anchor.BN(200_000_000_000_000);
-
-    let tokenExpectationCollateral = await PublicKey.findProgramAddressSync(
-      [
-        anchor.utils.bytes.utf8.encode("token_expectation"),
-        payer.publicKey.toBuffer(),
-        mintCollateral.publicKey.toBuffer(),
+      buyTokens: [
+        {
+          mint: mintDebt.publicKey,
+          amount: new anchor.BN(0),
+        },
       ],
-      expressRelay.programId
-    );
+    };
 
-    let tokenExpectationDebt = await PublicKey.findProgramAddressSync(
-      [
-        anchor.utils.bytes.utf8.encode("token_expectation"),
-        payer.publicKey.toBuffer(),
-        mintDebt.publicKey.toBuffer(),
-      ],
-      expressRelay.programId
-    );
-
-    const buyTokens = [collateral_amount];
-    const buyMints = [mintCollateral.publicKey];
-    const sellTokens = [debt_amount];
-    const sellMints = [mintDebt.publicKey];
-
-    let opportunityAdapterArgs;
-    let remainingAccountsOpportunityAdapter;
-    if (omitOpportunityAdapter) {
-      opportunityAdapterArgs = null;
-      remainingAccountsOpportunityAdapter = [];
-    } else {
-      opportunityAdapterArgs = {
-        sellTokens: sellTokens,
-        buyTokens: buyTokens,
-      };
-      remainingAccountsOpportunityAdapter = [
-        {
-          pubkey: payer.publicKey,
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: expressRelayAuthority[0],
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: TOKEN_PROGRAM_ID,
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: ASSOCIATED_TOKEN_PROGRAM_ID,
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: mintDebt.publicKey,
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: ataDebtPayer.address,
-          isWritable: true,
-          isSigner: false,
-        },
-        {
-          pubkey: tokenExpectationDebt[0],
-          isWritable: true,
-          isSigner: false,
-        },
-        {
-          pubkey: ataDebtRelayer,
-          isWritable: true,
-          isSigner: false,
-        },
-        {
-          pubkey: mintCollateral.publicKey,
-          isWritable: false,
-          isSigner: false,
-        },
-        {
-          pubkey: ataCollateralPayer.address,
-          isWritable: true,
-          isSigner: false,
-        },
-        {
-          pubkey: tokenExpectationCollateral[0],
-          isWritable: true,
-          isSigner: false,
-        },
-        {
-          pubkey: ataCollateralRelayer,
-          isWritable: true,
-          isSigner: false,
-        },
-      ];
-    }
-
-    const msgExpressRelay1 = Uint8Array.from(protocol.toBuffer());
-    const msgExpressRelay2 = Uint8Array.from(vault_id_bytes);
-    const msgExpressRelay3 = Uint8Array.from(payer.publicKey.toBuffer());
-    const msgExpressRelay4 = Uint8Array.from(
-      bidAmount.toArrayLike(Buffer, "le", 8)
-    );
-    const msgExpressRelay5 = Uint8Array.from(
-      validUntilExpressRelay.toArrayLike(Buffer, "le", 8)
-    );
-    let msgOpportunityAdapter1 = new Uint8Array(2);
-    msgOpportunityAdapter1[0] = buyTokens.length;
-    msgOpportunityAdapter1[1] = sellTokens.length;
-    let msgOpportunityAdapter2 = new Uint8Array(40 * buyTokens.length);
-    for (let i = 0; i < buyTokens.length; i++) {
-      msgOpportunityAdapter2.set(buyMints[i].toBuffer(), i * 40);
-      msgOpportunityAdapter2.set(buyTokens[i].toBuffer(), i * 40 + 32);
-    }
-    let msgOpportunityAdapter3 = new Uint8Array(40 * sellTokens.length);
-    for (let i = 0; i < sellTokens.length; i++) {
-      msgOpportunityAdapter3.set(sellMints[i].toBuffer(), i * 40);
-      msgOpportunityAdapter3.set(sellTokens[i].toBuffer(), i * 40 + 32);
-    }
-    let msgExpressRelay;
-    if (omitOpportunityAdapter) {
-      msgExpressRelay = Buffer.concat([
-        msgExpressRelay1,
-        msgExpressRelay2,
-        msgExpressRelay3,
-        msgExpressRelay4,
-        msgExpressRelay5,
-      ]);
-    } else {
-      msgExpressRelay = Buffer.concat([
-        msgExpressRelay1,
-        msgExpressRelay2,
-        msgExpressRelay3,
-        msgExpressRelay4,
-        msgExpressRelay5,
-        msgOpportunityAdapter1,
-        msgOpportunityAdapter2,
-        msgOpportunityAdapter3,
-      ]);
-    }
-    const digestExpressRelay = Buffer.from(
-      await crypto.subtle.digest("SHA-256", msgExpressRelay)
-    );
-    const signatureExpressRelay = await sign(
-      digestExpressRelay,
-      payer.secretKey.slice(0, 32)
-    );
-    const signatureExpressRelayFirst32 = signatureExpressRelay.slice(0, 32);
-    const signatureExpressRelayLast32 = signatureExpressRelay.slice(32, 64);
-    let signatureAccountingExpressRelay =
-      await PublicKey.findProgramAddressSync(
-        [
-          anchor.utils.bytes.utf8.encode("signature_accounting"),
-          signatureExpressRelayFirst32,
-          signatureExpressRelayLast32,
-        ],
-        expressRelay.programId
+    for (let opportunityAdapter of [true, false]) {
+      if (opportunityAdapter) {
+        console.log(
+          "Constructing the Kamino transaction with OpportunityAdapter"
+        );
+      } else {
+        console.log(
+          "Constructing the Kamino transaction without OpportunityAdapter"
+        );
+      }
+      let txExpressRelayKamino = await constructExpressRelayTransaction(
+        provider.connection,
+        expressRelay,
+        relayerSigner,
+        relayerFeeReceiver,
+        liquidatorVar,
+        protocolEmpty,
+        permissionIdEmpty,
+        bidAmountEmpty,
+        validUntilEmpty,
+        ixsKaminoLiq,
+        tokenAmounts,
+        opportunityAdapter,
+        kaminoLiquidationLookupTables
       );
-
-    const ixPermission = await expressRelay.methods
-      .permission({
-        permissionId: vault_id_bytes,
-        validUntil: validUntilExpressRelay,
-        // bidId: bidId,
-        bidAmount: bidAmount,
-        opportunityAdapterArgs: opportunityAdapterArgs,
-      })
-      .accounts({
-        relayerSigner: relayerSigner.publicKey,
-        permission: permission[0],
-        protocol: protocol,
-        signatureAccounting: signatureAccountingExpressRelay[0],
-        systemProgram: anchor.web3.SystemProgram.programId,
-        sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .remainingAccounts(remainingAccountsOpportunityAdapter)
-      .signers([relayerSigner])
-      .instruction();
-
-    const ixDepermission = await expressRelay.methods
-      .depermission()
-      .accounts({
-        relayerSigner: relayerSigner.publicKey,
-        permission: permission[0],
-        user: payer.publicKey,
-        protocol: protocol,
-        protocolFeeReceiver: protocolFeeReceiver[0],
-        relayerFeeReceiver: relayerFeeReceiver.publicKey,
-        protocolConfig: protocolConfig[0],
-        expressRelayMetadata: expressRelayMetadata[0],
-        wsolMint: WRAPPED_SOL_MINT,
-        wsolTaUser: wsolTaUser.address,
-        wsolTaExpressRelay: wsolTaExpressRelay[0],
-        expressRelayAuthority: expressRelayAuthority[0],
-        signatureAccounting: signatureAccountingExpressRelay[0],
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-        sysvarInstructions: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .remainingAccounts(remainingAccountsOpportunityAdapter.slice(4))
-      .signers([relayerSigner])
-      .instruction();
-
-    const ixSigVerifyExpressRelay =
-      anchor.web3.Ed25519Program.createInstructionWithPublicKey({
-        publicKey: payer.publicKey.toBytes(),
-        message: digestExpressRelay,
-        signature: signatureExpressRelay,
-      });
-
-    // create transaction
-    let transaction = new anchor.web3.Transaction();
-
-    transaction.add(ixPermission); // 48, 40 + 8
-    transaction.add(ixSigVerifyExpressRelay); // 0, 136 + 8
-
-    if (protocolLiquidate == "ezlend") {
-      // ez lend
-      transaction.add(ixLiquidate); // 88, 32 + 8
-    } else if (protocolLiquidate == "kamino") {
-      // kamino lend
-      transaction.add(...ixsKaminoLiq);
-    } else if (protocolLiquidate == "none") {
-    } else {
-      throw new Error("Invalid protocol liquidation");
     }
-
-    transaction.add(ixDepermission); // 120, 104 + 8
-
-    let solProtocolPre = await provider.connection.getBalance(
-      protocolFeeReceiver[0]
-    );
-    let solRelayerRentReceiverPre = await provider.connection.getBalance(
-      relayerRentReceiver.publicKey
-    );
-    let solRelayerFeeReceiverPre = await provider.connection.getBalance(
-      relayerFeeReceiver.publicKey
-    );
-    let solExpressRelayPre = await provider.connection.getBalance(
-      expressRelayMetadata[0]
-    );
-
-    console.log(
-      "SIZE of transaction (no lookup tables): ",
-      getTxSize(transaction, relayerSigner.publicKey)
-    );
-
-    // get lookup table accounts
-    const accountsGlobal = new Set<PublicKey>();
-    const accountsProtocol = new Set<PublicKey>();
-
-    // globals
-    accountsGlobal.add(relayerSigner.publicKey);
-    accountsGlobal.add(relayerFeeReceiver.publicKey);
-    accountsGlobal.add(relayerRentReceiver.publicKey);
-    accountsGlobal.add(expressRelayMetadata[0]);
-    accountsGlobal.add(WRAPPED_SOL_MINT);
-    accountsGlobal.add(wsolTaExpressRelay[0]);
-    accountsGlobal.add(expressRelayAuthority[0]);
-
-    // programs
-    accountsGlobal.add(anchor.web3.SystemProgram.programId);
-    accountsGlobal.add(TOKEN_PROGRAM_ID);
-    accountsGlobal.add(anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY);
-    accountsGlobal.add(ASSOCIATED_TOKEN_PROGRAM_ID);
-    accountsGlobal.add(expressRelay.programId);
-    accountsGlobal.add(Ed25519Program.programId);
-
-    // per protocol
-    accountsProtocol.add(protocol);
-    accountsProtocol.add(protocolFeeReceiver[0]);
-    accountsProtocol.add(protocolConfig[0]);
-    accountsProtocol.add(mintCollateral.publicKey);
-    accountsProtocol.add(mintDebt.publicKey);
-    accountsProtocol.add(taCollateralProtocol[0]);
-    accountsProtocol.add(taDebtProtocol[0]);
-    accountsProtocol.add(ataCollateralRelayer);
-    accountsProtocol.add(ataDebtRelayer);
-    accountsProtocol.add(tokenExpectationCollateral[0]);
-    accountsProtocol.add(tokenExpectationDebt[0]);
-    // could potentially add tokenExpectationCollateral and tokenExpectationDebt if still doesn't fit
-
-    console.log("LENGTH OF ACCOUNTS (GLOBAL): ", accountsGlobal.size);
-    console.log("LENGTH OF ACCOUNTS (PROTOCOL): ", accountsProtocol.size);
-
-    // create Lookup tables
-    const lookupTableGlobal = await createAndPopulateLookupTable(
-      provider.connection,
-      accountsGlobal,
-      relayerSigner,
-      relayerSigner
-    );
-    const lookupTableProtocol = await createAndPopulateLookupTable(
-      provider.connection,
-      accountsProtocol,
-      relayerSigner,
-      relayerSigner
-    );
-
-    // construct original tx with lookup table
-    const lookupTableGlobalAccount = (
-      await provider.connection.getAddressLookupTable(lookupTableGlobal)
-    ).value;
-    const lookupTableProtocolAccount = (
-      await provider.connection.getAddressLookupTable(lookupTableProtocol)
-    ).value;
-
-    let allLookupTables = [
-      lookupTableGlobalAccount,
-      lookupTableProtocolAccount,
-    ];
-
-    if (protocolLiquidate == "kamino") {
-      allLookupTables = allLookupTables.concat(kaminoLiquidationLookupTables);
-    }
-
-    const latestBlockHash = await provider.connection.getLatestBlockhash();
-    const messageV0 = new TransactionMessage({
-      payerKey: relayerSigner.publicKey,
-      recentBlockhash: latestBlockHash.blockhash,
-      instructions: transaction.instructions, // note this is an array of instructions
-    }).compileToV0Message(allLookupTables);
-
-    // create a v0 transaction from the v0 message
-    const transactionV0 = new VersionedTransaction(messageV0);
-    console.log(
-      "JSON Stringified tx (legacy) object: ",
-      JSON.stringify(transaction)
-    );
-    console.log(
-      "JSON Stringified tx (V0) object: ",
-      JSON.stringify(transactionV0)
-    );
-    const sizeVersionedTx = getVersionedTxSize(
-      transactionV0,
-      relayerSigner.publicKey
-    );
-
-    console.log("ESTIMATE OF versioned tx size: ", sizeVersionedTx);
-    console.log("LENGTH OF versioned msg: ", messageV0.serialize().length);
-
-    // sign the v0 transaction
-    if (omitOpportunityAdapter && protocolLiquidate == "ezlend") {
-      transactionV0.sign([relayerSigner, liquidatorEzLend]);
-    } else if (omitOpportunityAdapter && protocolLiquidate == "kamino") {
-      transactionV0.sign([relayerSigner, kaminoLiquidator]);
-    } else if (omitOpportunityAdapter) {
-      transactionV0.sign([relayerSigner, payer]);
-    } else {
-      transactionV0.sign([relayerSigner]);
-    }
-
-    console.log("LENGTH OF versioned tx: ", transactionV0.serialize().length);
-
-    // send and confirm the transaction
-    // const txResponse = await provider.connection.sendTransaction(transactionV0); // {skipPreflight: true}
-    const txResponse = await sendAndConfirmTransaction(
-      provider.connection,
-      transactionV0
-    ).catch((err) => {
-      console.log(err);
-    }); // {skipPreflight: true}
-
-    let solProtocolPost = await provider.connection.getBalance(
-      protocolFeeReceiver[0]
-    );
-    let solRelayerRentReceiverPost = await provider.connection.getBalance(
-      relayerRentReceiver.publicKey
-    );
-    let solRelayerFeeReceiverPost = await provider.connection.getBalance(
-      relayerFeeReceiver.publicKey
-    );
-    let solExpressRelayPost = await provider.connection.getBalance(
-      expressRelayMetadata[0]
-    );
-
-    // get token balances post liquidation
-    let balance_collateral_payer_2 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          ataCollateralPayer.address
-        )
-      ).value.amount
-    );
-    let balance_debt_payer_2 = Number(
-      (await provider.connection.getTokenAccountBalance(ataDebtPayer.address))
-        .value.amount
-    );
-    let balance_collateral_protocol_2 = Number(
-      (
-        await provider.connection.getTokenAccountBalance(
-          taCollateralProtocol[0]
-        )
-      ).value.amount
-    );
-    let balance_debt_protocol_2 = Number(
-      (await provider.connection.getTokenAccountBalance(taDebtProtocol[0]))
-        .value.amount
-    );
-
-    console.log("TX RESPONSE", txResponse);
-
-    assert(
-      balance_collateral_payer_1 ==
-        balance_collateral_payer_0 - collateral_amount.toNumber()
-    );
-    assert(
-      balance_debt_payer_1 == balance_debt_payer_0 + debt_amount.toNumber()
-    );
-    assert(
-      balance_collateral_protocol_1 ==
-        balance_collateral_protocol_0 + collateral_amount.toNumber()
-    );
-    assert(
-      balance_debt_protocol_1 ==
-        balance_debt_protocol_0 - debt_amount.toNumber()
-    );
-
-    console.log(
-      "BALANCES, COLLATERAL, USER",
-      balance_collateral_payer_2,
-      balance_collateral_payer_1,
-      collateral_amount
-    );
-    console.log(
-      "BALANCES, DEBT, USER",
-      balance_debt_payer_2,
-      balance_debt_payer_1,
-      debt_amount
-    );
-    console.log(
-      "BALANCES, COLLATERAL, PROTOCOL",
-      balance_collateral_protocol_2,
-      balance_collateral_protocol_1,
-      collateral_amount
-    );
-    console.log(
-      "BALANCES, DEBT, PROTOCOL",
-      balance_debt_protocol_2,
-      balance_debt_protocol_1,
-      debt_amount
-    );
-    assert(
-      balance_collateral_payer_2 ==
-        balance_collateral_payer_1 + collateral_amount.toNumber()
-    );
-    assert(
-      balance_debt_payer_2 == balance_debt_payer_1 - debt_amount.toNumber()
-    );
-    assert(
-      balance_collateral_protocol_2 ==
-        balance_collateral_protocol_1 - collateral_amount.toNumber()
-    );
-    assert(
-      balance_debt_protocol_2 ==
-        balance_debt_protocol_1 + debt_amount.toNumber()
-    );
   });
 });

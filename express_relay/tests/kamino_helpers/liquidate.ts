@@ -292,43 +292,6 @@ export const getLiquidationInstructionsFromAction = async (
     ...liquidateAction.lendingIxsLabels,
     ...liquidateAction.cleanupIxsLabels,
   ];
-  console.log("HERE ARE THE IXS FROM KAMINO");
-  // console.log("#1");
-  // console.log(withdrawAtaIx);
-  // console.log("#2");
-  // console.log(withdrawCTokenAtaIx);
-  console.log("#3");
-  console.log("LENGTH OF SETUP IXS", liquidateAction.setupIxs.length);
-  // for (let i = 0; i < liquidateAction.setupIxs.length; i++) {
-  //   console.log("KEYS");
-  //   console.log(liquidateAction.setupIxs[i].keys);
-  //   console.log("DATA");
-  //   console.log(liquidateAction.setupIxs[i].data);
-  //   console.log("PID");
-  //   console.log(liquidateAction.setupIxs[i].programId);
-  // }
-  console.log("");
-  console.log("#4");
-  console.log("LENGTH OF LENDING IXS", liquidateAction.lendingIxs.length);
-  // for (let i = 0; i < liquidateAction.lendingIxs.length; i++) {
-  //   console.log("KEYS");
-  //   console.log(liquidateAction.lendingIxs[i].keys);
-  //   console.log("DATA");
-  //   console.log(liquidateAction.lendingIxs[i].data);
-  //   console.log("PID");
-  //   console.log(liquidateAction.lendingIxs[i].programId);
-  // }
-  console.log("");
-  console.log("#5");
-  console.log("LENGTH OF CLEANUP IXS", liquidateAction.cleanupIxs.length);
-  // for (let i = 0; i < liquidateAction.cleanupIxs.length; i++) {
-  //   console.log("KEYS");
-  //   console.log(liquidateAction.cleanupIxs[i].keys);
-  //   console.log("DATA");
-  //   console.log(liquidateAction.cleanupIxs[i].data);
-  //   console.log("PID");
-  //   console.log(liquidateAction.cleanupIxs[i].programId);
-  // }
   return {
     ixs: [
       withdrawAtaIx,
