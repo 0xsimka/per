@@ -3,7 +3,9 @@ import {
   LAMPORTS_PER_SOL,
   PublicKey,
   AddressLookupTableAccount,
+  TransactionInstruction,
 } from "@solana/web3.js";
+import { MintInfo } from "@solana/spl-token";
 import * as anchor from "@coral-xyz/anchor";
 import { BN } from "@coral-xyz/anchor";
 import Decimal from "decimal.js";
@@ -97,4 +99,99 @@ export enum LiquidationReason {
 export type LookupTable = {
   address: PublicKey;
   account: AddressLookupTableAccount;
+};
+
+export interface TokenInfo {
+  symbol: string;
+  target: number;
+  mintAddress: PublicKey;
+  ata: PublicKey;
+  /**
+   * Balance with decimals
+   */
+  balance: Decimal;
+  usdValue: Decimal;
+  price: Decimal;
+  /**
+   * Number of decimals of the token, e.g. 6 for USDC
+   */
+  decimals: number;
+  /**
+   * 10 ** number of decimals of the token, e.g. 1_000_000 for 6 decimals
+   */
+  decimals10Pow: number;
+  reserveAddress: PublicKey;
+  diff: Decimal;
+  diffUsd: Decimal;
+  wrappedTokenType: WrappedTokenType;
+}
+
+export type SwapConfig = {
+  txAccounts?: Set<string>;
+  txAccountsBuffer?: number;
+  onlyDirectRoutes?: boolean;
+  wrapAndUnwrapSol?: boolean;
+  slippageBps: number;
+  destinationTokenAccount?: PublicKey;
+  feePerCULamports?: Decimal;
+};
+
+export type Swapper = (
+  inputMint: PublicKey,
+  outputMint: PublicKey,
+  inputAmountLamports: number,
+  swapConfig: SwapConfig
+) => Promise<SwapResponse>;
+
+export type SwapResponse = {
+  computeBudgetIxs: TransactionInstruction[];
+  setupIxs: TransactionInstruction[];
+  swapIxs: TransactionInstruction[];
+  cleanupIxs: TransactionInstruction[];
+  swapLookupTableAccounts: AddressLookupTableAccount[];
+  swapOutAmount: string;
+  swapMinOutAmount: string;
+};
+
+export type KeyedMintInfo = MintInfo & { address: PublicKey };
+
+export type LiquidityMintInfo = KeyedMintInfo & {
+  wrappedTokenType?: WrappedTokenType;
+};
+
+export enum WrappedTokenType {
+  KAMINO_LP_TOKEN = "KAMINO_LP_TOKEN",
+  JLP_TOKEN = "JLP_TOKEN",
+}
+
+export type TokenOracleData = {
+  symbol: string;
+  reserveAddress: PublicKey;
+  mintAddress: PublicKey;
+  /**
+   * 10 ** number of decimals of the token, e.g. 1_000_000 for 6 decimals
+   */
+  decimals: Decimal;
+  price: Decimal;
+};
+
+export interface TokenCount {
+  symbol: string;
+  target: number;
+}
+
+export type WalletBalances = {
+  liquidityBalances: TokenBalance[];
+  cTokenBalances: TokenBalance[];
+};
+
+export type TokenBalance = {
+  mint: PublicKey;
+  symbol: string;
+  /**
+   * The balance with decimals
+   */
+  balance: Decimal;
+  balanceBase: number;
+  ata: PublicKey;
 };

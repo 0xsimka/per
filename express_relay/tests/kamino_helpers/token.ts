@@ -4,6 +4,8 @@ import {
   TransactionInstruction,
   TransactionSignature,
   AccountInfo,
+  Connection,
+  SystemProgram,
 } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
 
@@ -14,11 +16,17 @@ import {
   MintInfo,
   MintLayout,
   u64,
+  AccountInfo as TokenAccountInfo,
+  AccountLayout,
 } from "@solana/spl-token";
 import BN from "bn.js";
 import { Env } from "./types";
 import { constructAndSendVersionedTransaction } from "./utils";
 import { KaminoMarket } from "@kamino-finance/klend-sdk";
+import {
+  KaminoReserve,
+  createAssociatedTokenAccountIdempotentInstruction,
+} from "@kamino-finance/klend-sdk";
 
 export async function createMint(
   env: Env,
@@ -231,4 +239,147 @@ export async function getAssociatedTokenAddress(
     owner,
     allowOwnerOffCurve
   );
+}
+
+export async function getAssociatedTokenAdressesForRewards(
+  collCtokenMint: PublicKey,
+  collLiquidityMint: PublicKey,
+  debtLiquidityMint: PublicKey,
+  payer: PublicKey
+) {
+  const collCtokenAta = await Token.getAssociatedTokenAddress(
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+    collCtokenMint,
+    payer
+  );
+
+  const collTokenAta = await Token.getAssociatedTokenAddress(
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+    collLiquidityMint,
+    payer
+  );
+
+  const debtTokenAta = await Token.getAssociatedTokenAddress(
+    ASSOCIATED_TOKEN_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+    debtLiquidityMint,
+    payer
+  );
+
+  return [collCtokenAta, collTokenAta, debtTokenAta];
+}
+
+export async function createCollTokenAtaAndCTokenAtaAccounts(
+  c: Connection,
+  payer: Keypair,
+  collReserve: KaminoReserve,
+  tokenAta: PublicKey,
+  cTokenAta: PublicKey
+) {
+  const ixs: TransactionInstruction[] = [];
+  const cTokenAtaAccountInfo = await c.getAccountInfo(cTokenAta);
+
+  if (!cTokenAtaAccountInfo) {
+    const [, createcTokenAccountIx] =
+      await createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        collReserve.state.collateral.mintPubkey,
+        payer.publicKey,
+        cTokenAta
+      );
+    ixs.push(createcTokenAccountIx);
+  } else {
+    const cTokenAtaBalance = await c.getTokenAccountBalance(cTokenAta);
+    console.debug(
+      `cTokenAtaBalance before: ${cTokenAtaBalance.value.uiAmountString}`
+    );
+  }
+
+  const tokenAtaAccountInfo = await c.getAccountInfo(tokenAta);
+  if (!tokenAtaAccountInfo) {
+    const [, createTokenAccountIx] =
+      await createAssociatedTokenAccountIdempotentInstruction(
+        payer.publicKey,
+        collReserve.getLiquidityMint(),
+        payer.publicKey,
+        tokenAta
+      );
+    ixs.push(createTokenAccountIx);
+  } else {
+    const collTokenAtaBalance = await c.getTokenAccountBalance(tokenAta);
+    console.debug(
+      `collTokenAtaBalance before: ${collTokenAtaBalance.value.uiAmountString}`
+    );
+  }
+
+  return ixs;
+}
+
+export function deserializeTokenAccount(
+  address: PublicKey,
+  data: Buffer
+): TokenAccountInfo {
+  const accountInfo = AccountLayout.decode(data);
+  accountInfo.address = address;
+  accountInfo.mint = new PublicKey(accountInfo.mint);
+  accountInfo.owner = new PublicKey(accountInfo.owner);
+  accountInfo.amount = u64.fromBuffer(accountInfo.amount);
+
+  if (accountInfo.delegateOption === 0) {
+    accountInfo.delegate = null;
+    // eslint-disable-next-line new-cap
+    accountInfo.delegatedAmount = new u64(0);
+  } else {
+    accountInfo.delegate = new PublicKey(accountInfo.delegate);
+    accountInfo.delegatedAmount = u64.fromBuffer(accountInfo.delegatedAmount);
+  }
+
+  accountInfo.isInitialized = accountInfo.state !== 0;
+  accountInfo.isFrozen = accountInfo.state === 2;
+
+  if (accountInfo.isNativeOption === 1) {
+    accountInfo.rentExemptReserve = u64.fromBuffer(accountInfo.isNative);
+    accountInfo.isNative = true;
+  } else {
+    accountInfo.rentExemptReserve = null;
+    accountInfo.isNative = false;
+  }
+
+  if (accountInfo.closeAuthorityOption === 0) {
+    accountInfo.closeAuthority = null;
+  } else {
+    accountInfo.closeAuthority = new PublicKey(accountInfo.closeAuthority);
+  }
+
+  return accountInfo;
+}
+
+export async function createTokenAccountInstructions(
+  connection: Connection,
+  newAccountPubkey: PublicKey,
+  mint: PublicKey,
+  owner: PublicKey,
+  lamports?: number
+): Promise<TransactionInstruction[]> {
+  let rent = lamports;
+  if (rent === undefined) {
+    rent = await connection.getMinimumBalanceForRentExemption(165);
+  }
+  return [
+    SystemProgram.createAccount({
+      fromPubkey: owner,
+      newAccountPubkey,
+      space: 165,
+      lamports: rent,
+      programId: TOKEN_PROGRAM_ID,
+    }),
+    Token.createInitAccountInstruction(
+      TOKEN_PROGRAM_ID,
+      mint,
+      newAccountPubkey,
+      owner
+    ),
+  ];
 }

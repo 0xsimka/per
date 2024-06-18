@@ -28,7 +28,12 @@ import {
   getMarketsFromApi,
 } from "@kamino-finance/klend-sdk";
 import { Kamino } from "@hubbleprotocol/kamino-sdk";
-import { LiquidityMintInfo, getReserveLiquidityMints } from "./token";
+import {
+  createCollTokenAtaAndCTokenAtaAccounts,
+  LiquidityMintInfo,
+  getReserveLiquidityMints,
+  getAssociatedTokenAdressesForRewards,
+} from "./token";
 import {
   ReserveAutodeleverageStatus,
   getAutodeleverageStatus,
@@ -46,7 +51,11 @@ import { createOrSyncUserLookupTables } from "../helpers/lookupTable";
 import { KAMINO_GLOBAL_CONFIG, RAYDIUM_PROGRAM_ID } from "./constants";
 import { WHIRLPOOL_PROGRAM_ID } from "@hubbleprotocol/kamino-sdk/dist/whirpools-client/programId";
 import { PROGRAM_ID as KAMINO_PROGRAM_ID } from "@hubbleprotocol/kamino-sdk/dist/kamino-client/programId";
-import { loadMarkets } from "./utils";
+import { loadMarkets, uniqueAccounts } from "./utils";
+import { TokenInfo, Swapper } from "./types";
+import { toLamports } from "../kamino_helpers/utils";
+import { getSwapper } from "./swap";
+import { Jupiter } from "./jupiter";
 
 export async function getLiquidationLookupTables(
   // kaminoMarket: KaminoMarket,
@@ -155,6 +164,115 @@ export function calculateExchangeRates(
       kaminoMarket.getCollateralExchangeRatesByReserve(slot),
     cumulativeBorrowRates: kaminoMarket.getCumulativeBorrowRatesByReserve(slot),
   };
+}
+
+/// This function is used to swap on Jupiter the base token info found in the liquidator wallet for
+/// the selected debt token of the obligation and then liquidate the obligation in the same tx
+export async function swapAndLiquidate(
+  c: Connection,
+  kaminoMarket: KaminoMarket,
+  liquidator: Keypair,
+  obligation: KaminoObligation,
+  amountToSwap: number,
+  repayReserve: KaminoReserve,
+  withdrawReserve: KaminoReserve,
+  baseTokenInfo: TokenInfo,
+  jupiter: null | Jupiter,
+  cluster: Cluster,
+  config: LiquidationConfig
+): Promise<TransactionInstruction[]> {
+  const { slippageConfig, overrides, txConfig } = config;
+  const ob = `${obligation.obligationAddress}`;
+  const ixs: TransactionInstruction[] = [];
+  ixs.push(
+    ...createAddExtraComputeUnitsTransaction(620_000, txConfig.feePerCULamports)
+  );
+  const maxAllowedLtvOverridePercent = overrides.ltvPct ?? 0;
+
+  const [cTokenAta, tokenAta] = await getAssociatedTokenAdressesForRewards(
+    withdrawReserve.state.collateral.mintPubkey,
+    withdrawReserve.getLiquidityMint(),
+    repayReserve.getLiquidityMint(),
+    liquidator.publicKey
+  );
+
+  const preIxs = await createCollTokenAtaAndCTokenAtaAccounts(
+    c,
+    liquidator,
+    withdrawReserve,
+    tokenAta,
+    cTokenAta
+  );
+  ixs.push(...preIxs);
+
+  const wrapAndUnwrapSol = false;
+  const swapper: Swapper = getSwapper(
+    kaminoMarket,
+    liquidator,
+    cluster,
+    jupiter,
+    baseTokenInfo.mintAddress,
+    repayReserve.getLiquidityMint(),
+    [baseTokenInfo]
+  );
+
+  // create the swap tx with a hardcoded amount of 1 count # of locked accounts in the tx
+  const { ixs: simulatedIxs } = await getLiquidationInstructionsFromAction(
+    kaminoMarket,
+    liquidator,
+    obligation,
+    repayReserve.address,
+    withdrawReserve.address,
+    "1",
+    new Decimal("0"), // todo elliot
+    maxAllowedLtvOverridePercent
+  );
+
+  const { swapIxs, swapLookupTableAccounts, swapMinOutAmount } = await swapper(
+    baseTokenInfo.mintAddress,
+    repayReserve.getLiquidityMint(),
+    amountToSwap,
+    {
+      txAccounts: uniqueAccounts(simulatedIxs), // pass the simulated count of locked accounts
+      wrapAndUnwrapSol,
+      slippageBps: slippageConfig.swapSlippageBps,
+    }
+  );
+  ixs.push(...swapIxs);
+
+  // TODO: slippage - liquidation bonus might make the liquidator unprofitable, handle that situation
+
+  const borrow = obligation.getBorrowByReserve(repayReserve.address)!;
+  const liquidityAmount = Decimal.min(
+    swapMinOutAmount,
+    toLamports(borrow.amount.toString(), repayReserve.stats.decimals)
+  ).toString();
+  // create the swap tx with the actual liquidation amount after swapping
+  const { ixs: liquidationIxs } = await getLiquidationInstructionsFromAction(
+    kaminoMarket,
+    liquidator,
+    obligation,
+    repayReserve.address,
+    withdrawReserve.address,
+    liquidityAmount,
+    new Decimal("0"), // todo elliot
+    maxAllowedLtvOverridePercent
+  );
+  ixs.push(...liquidationIxs);
+
+  // TODO: Check -10% with minimum acceptable amount
+  // getFinalLiquidationReward(
+  //   lendingMarketInfo,
+  //   borrowedValue,
+  //   selectedBorrow,
+  //   selectedDeposit,
+  //   withdrawReserve,
+  //   new Decimal(jupOutAmount.toString()).toNumber(),
+  // );
+
+  const filteredIxs = sanitizeInstructions(ixs);
+
+  return filteredIxs;
 }
 
 /// Create ATAs and liquidate the obligation in the same tx

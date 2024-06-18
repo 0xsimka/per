@@ -32,7 +32,7 @@ import {
   getTokenAccountBalance,
 } from "@kamino-finance/klend-sdk";
 import { setupMarketWithLoan } from "./kamino_helpers/fixtures";
-import { Env } from "./kamino_helpers/types";
+import { Env, TokenCount } from "./kamino_helpers/types";
 import {
   mintToUser,
   reloadMarket,
@@ -49,11 +49,17 @@ import {
   getLiquidationLookupTables,
   getMarketAccounts,
   liquidateAndRedeem,
+  swapAndLiquidate,
 } from "./kamino_helpers/liquidate";
 import { createAndPopulateLookupTable } from "./helpers/lookupTable";
 import { initializeFarmsForReserve } from "./kamino_helpers/kamino/initFarms";
 import { constructExpressRelayTransaction } from "./helpers/expressRelayTransaction";
 import { constructAndSendEzLendLiquidateTransaction } from "./helpers/ezLendTransaction";
+import { LAMPORTS_PER_SOL } from "./kamino_helpers/constants";
+import { aggregateUserTokenInfo } from "./kamino_helpers/swap";
+import { getTokensOracleData } from "./kamino_helpers/oracle";
+import { getWalletBalances } from "./kamino_helpers/wallet";
+import { Jupiter } from "./kamino_helpers/jupiter";
 
 // args
 // set log-level to "debug" to see all logs; set to "log" or "error" to see only subset
@@ -79,7 +85,6 @@ describe("express_relay", () => {
   );
 
   const provider = anchor.AnchorProvider.local();
-  const LAMPORTS_PER_SOL = 1000000000;
   const searcher = anchor.web3.Keypair.generate();
   const mintCollateralAuthority = anchor.web3.Keypair.generate();
   const mintDebtAuthority = anchor.web3.Keypair.generate();
@@ -154,6 +159,9 @@ describe("express_relay", () => {
   let obligationVar;
   let liquidatorPathVar;
   let liquidatorVar;
+
+  let liquidityTokenMintsVar;
+  let tokensOracleVar;
 
   let relayerSigner;
   let relayerFeeReceiver;
@@ -570,6 +578,16 @@ describe("express_relay", () => {
         env: env,
       });
 
+    const startingUsdhBalance = 5000;
+    await reloadMarket(env, kaminoMarket);
+    await mintToUser(
+      env,
+      kaminoMarket.getReserveBySymbol("USDH")!.getLiquidityMint(),
+      liquidator.publicKey,
+      toLamports(startingUsdhBalance, 6),
+      liquidator
+    );
+
     initializeFarmsForReserve(
       env,
       new PublicKey(kaminoMarket.address),
@@ -605,6 +623,11 @@ describe("express_relay", () => {
       configLiquidation,
       []
     );
+    let { liquidityTokenMints } = marketAccs;
+    let tokensOracle = getTokensOracleData(
+      kaminoMarket,
+      ...marketAccs.additionalOraclePrices
+    );
 
     // give the liquidator enough USDC to not need to flash borrow
     await mintToUser(
@@ -630,6 +653,9 @@ describe("express_relay", () => {
     obligationVar = oblig;
     liquidatorPathVar = liquidatorPath;
     liquidatorVar = liquidator;
+
+    liquidityTokenMintsVar = liquidityTokenMints;
+    tokensOracleVar = tokensOracle;
   });
 
   it("Empty Express Relay transaction (for sizing)", async () => {
@@ -794,7 +820,7 @@ describe("express_relay", () => {
     }
   });
 
-  it("Kamino liquidation (with/without Opportunity Adapter)", async () => {
+  it("Kamino liquidation liquidate directly (with/without Opportunity Adapter)", async () => {
     let permissionIdEmpty = new Uint8Array(32);
     let validUntilEmpty = new anchor.BN(200_000_000_000);
     let bidAmountEmpty = new anchor.BN(0);
@@ -838,11 +864,117 @@ describe("express_relay", () => {
     for (let opportunityAdapter of [true, false]) {
       if (opportunityAdapter) {
         console.log(
-          "Constructing the Kamino transaction with OpportunityAdapter"
+          "Constructing the Kamino direct liquidate transaction with OpportunityAdapter"
         );
       } else {
         console.log(
-          "Constructing the Kamino transaction without OpportunityAdapter"
+          "Constructing the Kamino direct liquidate transaction without OpportunityAdapter"
+        );
+      }
+      let txExpressRelayKamino = await constructExpressRelayTransaction(
+        provider.connection,
+        expressRelay,
+        relayerSigner,
+        relayerFeeReceiver,
+        liquidatorVar,
+        protocolEmpty,
+        permissionIdEmpty,
+        bidAmountEmpty,
+        validUntilEmpty,
+        ixsKaminoLiq,
+        tokenAmounts,
+        opportunityAdapter,
+        kaminoLiquidationLookupTables
+      );
+    }
+  });
+
+  it("Kamino liquidation swap and liquidate (with/without Opportunity Adapter)", async () => {
+    let permissionIdEmpty = new Uint8Array(32);
+    let validUntilEmpty = new anchor.BN(200_000_000_000);
+    let bidAmountEmpty = new anchor.BN(0);
+    let protocolEmpty = new PublicKey(0);
+
+    let targets: TokenCount[] = [
+      {
+        symbol: "USDC",
+        target: 2,
+      },
+      {
+        symbol: "USDH",
+        target: 3,
+      },
+      {
+        symbol: "SOL",
+        target: 1,
+      },
+    ];
+
+    let walletBalances = await getWalletBalances(
+      provider.connection,
+      kaminoMarketVar,
+      liquidatorVar,
+      tokensOracleVar
+    );
+
+    const tokenInfos = aggregateUserTokenInfo(
+      liquidityTokenMintsVar,
+      tokensOracleVar,
+      walletBalances.liquidityBalances,
+      liquidatorVar,
+      targets
+    );
+    const baseTokenInfo = tokenInfos.find(({ symbol }) => symbol === "USDH");
+    const amountToSwap = 1000;
+
+    // set to ensure jupiter txs are constructed
+    const jupiter = new Jupiter(liquidatorVar, provider.connection, env);
+    const cluster = "localnet";
+
+    ixsKaminoLiq = await swapAndLiquidate(
+      provider.connection,
+      kaminoMarketVar,
+      liquidatorVar,
+      oblig,
+      amountToSwap,
+      kaminoMarketVar.getReserveBySymbol("SOL"),
+      kaminoMarketVar.getReserveBySymbol("USDC"),
+      baseTokenInfo,
+      jupiter,
+      cluster,
+      configLiquidation
+    );
+
+    kaminoLiquidationLookupTables = await getLiquidationLookupTables(
+      provider.connection,
+      klendProgramId,
+      new PublicKey(kaminoMarketVar.address),
+      liquidatorVar
+    );
+
+    let tokenAmounts = {
+      sellTokens: [
+        {
+          mint: mintCollateral.publicKey,
+          amount: new anchor.BN(0),
+        },
+      ],
+      buyTokens: [
+        {
+          mint: mintDebt.publicKey,
+          amount: new anchor.BN(0),
+        },
+      ],
+    };
+
+    for (let opportunityAdapter of [true, false]) {
+      if (opportunityAdapter) {
+        console.log(
+          "Constructing the Kamino swap & liquidate transaction with OpportunityAdapter"
+        );
+      } else {
+        console.log(
+          "Constructing the Kamino swap & liquidate transaction without OpportunityAdapter"
         );
       }
       let txExpressRelayKamino = await constructExpressRelayTransaction(

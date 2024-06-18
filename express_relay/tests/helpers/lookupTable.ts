@@ -526,3 +526,25 @@ export function getPriceKeysForReserve(reserve: KaminoReserve) {
   }
   return priceKeys;
 }
+
+export const getLookupTableAccountsFromKeys = async (
+  connection: Connection,
+  keys: PublicKey[]
+): Promise<AddressLookupTableAccount[]> => {
+  const lookupTableAccounts: AddressLookupTableAccount[] = [];
+
+  for (const lookupTable of keys) {
+    const lookupTableAccount = await connection
+      .getAddressLookupTable(new PublicKey(lookupTable))
+      .then((res) => res.value);
+
+    if (!lookupTableAccount) {
+      console.error("lookup table is not found");
+      throw new Error("lookup table is not found");
+    }
+
+    lookupTableAccounts.push(lookupTableAccount);
+  }
+
+  return lookupTableAccounts;
+};

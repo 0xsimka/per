@@ -47,6 +47,14 @@ export function toLamports(
   return new Decimal(amount.toString()).mul(factor).toNumber();
 }
 
+export function fromLamports(
+  amount: string | BN | number | Decimal,
+  decimals: number
+): number {
+  const factor = 10 ** decimals;
+  return new Decimal(amount.toString()).div(factor).toNumber();
+}
+
 const encodeTokenName = (tokenName: string): number[] => {
   const buffer: Buffer = Buffer.alloc(32);
 
@@ -320,4 +328,31 @@ export async function loadMarkets(
   }
   await Promise.all(loadMarkets);
   return markets;
+}
+
+export function uniqueAccounts(
+  ixs: TransactionInstruction[],
+  addressLookupTables: PublicKey[] | AddressLookupTableAccount[] = []
+): Set<string> {
+  let luts: string[];
+  if (
+    addressLookupTables.length > 0 &&
+    addressLookupTables[0] instanceof AddressLookupTableAccount
+  ) {
+    luts = (addressLookupTables as AddressLookupTableAccount[]).map((lut) =>
+      lut.key.toBase58()
+    );
+  } else {
+    luts = (addressLookupTables as PublicKey[]).map((k) => k.toBase58());
+  }
+  const uniqueAccounts = ixs
+    .map((ix) => ix.keys.map((k) => k.pubkey.toBase58()))
+    .flat()
+    .concat(...luts);
+  return new Set(uniqueAccounts);
+}
+
+export const MAX_LOCKED_ACCOUNTS = 64;
+export function maxLockedAccounts(count: number): number {
+  return MAX_LOCKED_ACCOUNTS - count;
 }
