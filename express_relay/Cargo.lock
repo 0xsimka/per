@@ -2130,6 +2130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "intent_swap"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "bytemuck",
+ "express_relay",
+ "solana-program",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
