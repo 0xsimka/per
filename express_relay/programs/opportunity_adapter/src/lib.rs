@@ -16,7 +16,7 @@ use crate::{
     utils::*,
 };
 
-declare_id!("Gn4yXmex2gAWUHJcFHy6iUkwPurka6uJMGPfzeZbKFFD");
+declare_id!("33SWSxyxVE8QbfE17xXeGZT7cphwTT6dEPeksqpedyH2");
 
 #[inline(never)]
 pub fn validate_signature(

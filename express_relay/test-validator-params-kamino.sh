@@ -64,8 +64,8 @@ function print_args {
   echo "--bpf-program whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc ./kamino-lending-liquidations-bot/deps/programs/whirlpool.so"
 
   # express relay programs
-  echo "--bpf-program AJ9QckBqWJdz5RAxpMi2P83q6R7y5xZ2yFxCAYr3bg3N ./target/deploy/express_relay.so"
-  echo "--bpf-program 3Gz8dhzokRoE5r9b5oyvrBqceAo9zxzVrgRzQdc6WTTm ./target/deploy/ez_lend.so"
+  echo "--bpf-program 26HRYgUNuW9zckjghRLzQuBfVoZtKhkVHfPRdYPZW3bz ./target/deploy/express_relay.so"
+  echo "--bpf-program D8WXCtJnRkGpGHHeHmUHAKsdtMEFRR7T5LqAXB4BzieS ./target/deploy/ez_lend.so"
 
   # options
   echo "--reset"

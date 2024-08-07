@@ -9,6 +9,7 @@
     "@kamino-finance/klend-sdk": "2.10.8",
     "@noble/ed25519": "^1.6.0",
     "@solana/spl-token": "^0.1.8",
+    "bigint-buffer": "^1.1.5",
     "bn.js": "^5.2.1",
     "crypto": "^1.0.1",
     "winston": "^3.8.2"

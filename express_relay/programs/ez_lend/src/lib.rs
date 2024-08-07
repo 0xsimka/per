@@ -5,7 +5,7 @@ use express_relay::{
     ID as EXPRESS_RELAY_PROGRAM_ID
 };
 
-declare_id!("3Gz8dhzokRoE5r9b5oyvrBqceAo9zxzVrgRzQdc6WTTm");
+declare_id!("D8WXCtJnRkGpGHHeHmUHAKsdtMEFRR7T5LqAXB4BzieS");
 
 #[program]
 pub mod ez_lend {

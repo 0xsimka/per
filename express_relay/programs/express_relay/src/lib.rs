@@ -15,7 +15,7 @@ use crate::{
 };
 use std::str::FromStr;
 
-declare_id!("AJ9QckBqWJdz5RAxpMi2P83q6R7y5xZ2yFxCAYr3bg3N");
+declare_id!("26HRYgUNuW9zckjghRLzQuBfVoZtKhkVHfPRdYPZW3bz");
 
 #[program]
 pub mod express_relay {

@@ -169,6 +169,7 @@ describe("express_relay", () => {
 
   // get relayer and admin keypairs
   before(async () => {
+    console.log("BEFORE 1 Start");
     if (!fs.existsSync("tests/keys/relayerSigner.json")) {
       relayerSigner = anchor.web3.Keypair.generate();
       await writeKeypairToFile(
@@ -207,10 +208,12 @@ describe("express_relay", () => {
       relayerFeeReceiver.publicKey.toBase58()
     );
     console.log("admin: ", admin.publicKey.toBase58());
+    console.log("BEFORE 1 End");
   });
 
   // fund wallets
   before(async () => {
+    console.log("BEFORE 2 Start");
     let airdropSignatureSearcher = await provider.connection.requestAirdrop(
       searcher.publicKey,
       20 * LAMPORTS_PER_SOL
@@ -225,10 +228,12 @@ describe("express_relay", () => {
     await provider.connection.confirmTransaction(
       airdrop_signature_relayer_signer
     );
+    console.log("BEFORE 2 End");
   });
 
   // initialize express relay
   before(async () => {
+    console.log("BEFORE 3 Start");
     const balanceExpressRelayMetadata = await provider.connection.getBalance(
       expressRelayMetadata[0]
     );
@@ -251,10 +256,12 @@ describe("express_relay", () => {
     } else {
       console.debug("Express Relay already initialized");
     }
+    console.log("BEFORE 3 End");
   });
 
   // set up EzLend--mints, tokens, token accounts, approvals
   before(async () => {
+    console.log("BEFORE 4 Start");
     // create mints
     mintCollateral = await Token.createMint(
       provider.connection,
@@ -560,10 +567,12 @@ describe("express_relay", () => {
           debtAmountEzLend.toNumber()
       );
     }
+    console.log("BEFORE 4 End");
   });
 
   // set up klend market and obligation, undercollateralize by pulling price down
   before(async () => {
+    console.log("BEFORE 5 Start");
     let { kaminoMarket, obligation, liquidatorPath, liquidator } =
       await setupMarketWithLoan({
         loan: {
@@ -656,6 +665,7 @@ describe("express_relay", () => {
 
     liquidityTokenMintsVar = liquidityTokenMints;
     tokensOracleVar = tokensOracle;
+    console.log("BEFORE 5 End");
   });
 
   it("Empty Express Relay transaction (for sizing)", async () => {
