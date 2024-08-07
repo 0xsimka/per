@@ -43,7 +43,8 @@ export async function constructExpressRelayTransaction(
     }[];
   },
   opportunityAdapter: boolean,
-  additionalLookupTables: AddressLookupTableAccount[] = []
+  additionalLookupTables: AddressLookupTableAccount[] = [],
+  verbose: boolean = false
 ): Promise<VersionedTransaction> {
   let tokenExpectationsCollateral: PublicKey[] = tokenAmounts.buyTokens.map(
     (token) => {
@@ -286,7 +287,7 @@ export async function constructExpressRelayTransaction(
 
   console.log(
     "SIZE of transaction (no lookup tables): ",
-    getTxSize(transaction, relayerSigner.publicKey)
+    getTxSize(transaction, relayerSigner.publicKey, verbose)
   );
 
   const lutAccountsGlobal = [
@@ -342,7 +343,8 @@ export async function constructExpressRelayTransaction(
   const transactionV0 = new VersionedTransaction(messageV0);
   const sizeVersionedTx = getVersionedTxSize(
     transactionV0,
-    relayerSigner.publicKey
+    relayerSigner.publicKey,
+    verbose
   );
 
   console.log("ESTIMATE OF versioned tx size: ", sizeVersionedTx);

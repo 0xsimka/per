@@ -22,7 +22,11 @@ const compactHeader = (n: number) =>
 const compactArraySize = (n: number, size: number) =>
   compactHeader(n) + n * size;
 
-export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
+export const getTxSize = (
+  tx: Transaction,
+  feePayer: PublicKey,
+  verbose: boolean = false
+): number => {
   const feePayerPk = [feePayer.toBase58()];
 
   const signers = new Set<string>(feePayerPk);
@@ -44,9 +48,15 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
 
     ixNumber += 1;
 
-    console.debug("ix number", ixNumber);
-    console.debug("n accounts in ix: ", nIndexes);
-    console.debug("length of data in ix: ", opaqueData);
+    if (verbose) {
+      console.log("ix number", ixNumber);
+      console.log("n accounts in ix: ", nIndexes);
+      console.log("length of data in ix: ", opaqueData);
+    } else {
+      console.debug("ix number", ixNumber);
+      console.debug("n accounts in ix: ", nIndexes);
+      console.debug("length of data in ix: ", opaqueData);
+    }
     return (
       acc +
       1 + // PID index
@@ -61,12 +71,21 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
   const sizeBlockhash = 32;
   const sizeNInstructions = compactHeader(tx.instructions.length);
 
-  console.debug("Size of header: ", sizeHeader);
-  console.debug("Size of blockhash: ", sizeBlockhash);
-  console.debug("Size of signatures: ", sizeSignatures);
-  console.debug("Size of accounts: ", sizeAccounts);
-  console.debug("Size of number of instructions: ", sizeNInstructions);
-  console.debug("Size of ixs: ", ixsSize);
+  if (verbose) {
+    console.log("Size of header: ", sizeHeader);
+    console.log("Size of blockhash: ", sizeBlockhash);
+    console.log("Size of signatures: ", sizeSignatures);
+    console.log("Size of accounts: ", sizeAccounts);
+    console.log("Size of number of instructions: ", sizeNInstructions);
+    console.log("Size of ixs: ", ixsSize);
+  } else {
+    console.debug("Size of header: ", sizeHeader);
+    console.debug("Size of blockhash: ", sizeBlockhash);
+    console.debug("Size of signatures: ", sizeSignatures);
+    console.debug("Size of accounts: ", sizeAccounts);
+    console.debug("Size of number of instructions: ", sizeNInstructions);
+    console.debug("Size of ixs: ", ixsSize);
+  }
 
   return (
     sizeSignatures +
@@ -80,7 +99,8 @@ export const getTxSize = (tx: Transaction, feePayer: PublicKey): number => {
 
 export const getVersionedTxSize = (
   tx: VersionedTransaction,
-  feePayer: PublicKey
+  feePayer: PublicKey,
+  verbose: boolean = false
 ): number => {
   const feePayerPk = [feePayer.toBase58()];
 
@@ -110,9 +130,16 @@ export const getVersionedTxSize = (
 
     ixNumber += 1;
 
-    console.debug("ix number", ixNumber);
-    console.debug("n accounts in ix: ", nIndexes);
-    console.debug("length of data in ix: ", opaqueData);
+    if (verbose) {
+      console.log("ix number", ixNumber);
+      console.log("n accounts in ix: ", nIndexes);
+      console.log("length of data in ix: ", opaqueData);
+    } else {
+      console.debug("ix number", ixNumber);
+      console.debug("n accounts in ix: ", nIndexes);
+      console.debug("length of data in ix: ", opaqueData);
+    }
+
     return (
       acc +
       1 + // PID index
@@ -131,13 +158,23 @@ export const getVersionedTxSize = (
     tx.message.compiledInstructions.length
   );
 
-  console.debug("Size of header: ", sizeHeader);
-  console.debug("Size of blockhash: ", sizeBlockhash);
-  console.debug("Size of signatures: ", sizeSignatures);
-  console.debug("Size of accounts: ", sizeAccounts);
-  console.debug("Size of number of instructions: ", sizeNInstructions);
-  console.debug("Size of ixs: ", ixsSize);
-  console.debug("Size of lookup: ", lookupSize);
+  if (verbose) {
+    console.log("Size of header: ", sizeHeader);
+    console.log("Size of blockhash: ", sizeBlockhash);
+    console.log("Size of signatures: ", sizeSignatures);
+    console.log("Size of accounts: ", sizeAccounts);
+    console.log("Size of number of instructions: ", sizeNInstructions);
+    console.log("Size of ixs: ", ixsSize);
+    console.log("Size of lookup: ", lookupSize);
+  } else {
+    console.debug("Size of header: ", sizeHeader);
+    console.debug("Size of blockhash: ", sizeBlockhash);
+    console.debug("Size of signatures: ", sizeSignatures);
+    console.debug("Size of accounts: ", sizeAccounts);
+    console.debug("Size of number of instructions: ", sizeNInstructions);
+    console.debug("Size of ixs: ", ixsSize);
+    console.debug("Size of lookup: ", lookupSize);
+  }
 
   return (
     sizeSignatures +

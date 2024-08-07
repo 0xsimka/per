@@ -711,7 +711,9 @@ describe("express_relay", () => {
         validUntilEmpty,
         [],
         tokenAmounts,
-        opportunityAdapter
+        opportunityAdapter,
+        [],
+        true
       );
       await sendAndConfirmVersionedTransaction(
         provider.connection,
