@@ -1568,6 +1568,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "express_relay_minified"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "ez_lend"
 version = "0.1.0"
 dependencies = [

@@ -66,6 +66,7 @@ function print_args {
   # express relay programs
   echo "--bpf-program 26HRYgUNuW9zckjghRLzQuBfVoZtKhkVHfPRdYPZW3bz ./target/deploy/express_relay.so"
   echo "--bpf-program D8WXCtJnRkGpGHHeHmUHAKsdtMEFRR7T5LqAXB4BzieS ./target/deploy/ez_lend.so"
+  echo "--bpf-program 9K9LArmVbg1zjafXGf1rSt2kNgR4mSwRbGiDyNSnrNTi ./target/deploy/express_relay_minified.so"
 
   # options
   echo "--reset"

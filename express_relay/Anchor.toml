@@ -11,6 +11,7 @@ ez_lend = "D8WXCtJnRkGpGHHeHmUHAKsdtMEFRR7T5LqAXB4BzieS"
 ez_lend_vanilla = "5UjkdSGokcs4HqkoZZs2Wv9HVgVW6ydeh9UVk953vM62"
 kamino_lending = "3hoVgJh7XrZWyfTULgR8KkdS7PYgxhZnSbCsWGtYGgdb"
 opportunity_adapter = "33SWSxyxVE8QbfE17xXeGZT7cphwTT6dEPeksqpedyH2"
+express_relay_minified = "9K9LArmVbg1zjafXGf1rSt2kNgR4mSwRbGiDyNSnrNTi"
 
 [registry]
 url = "https://api.apr.dev"

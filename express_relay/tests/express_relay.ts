@@ -1,6 +1,7 @@
 import Decimal from "decimal.js";
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
+import { ExpressRelayMinified } from "../target/types/express_relay_minified";
 import { ExpressRelay } from "../target/types/express_relay";
 import { EzLend } from "../target/types/ez_lend";
 import {
@@ -78,6 +79,8 @@ describe("express_relay", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
 
+  const expressRelayMinified = anchor.workspace
+    .ExpressRelayMinified as Program<ExpressRelayMinified>;
   const expressRelay = anchor.workspace.ExpressRelay as Program<ExpressRelay>;
   const ezLend = anchor.workspace.EzLend as Program<EzLend>;
   const klendProgramId = new PublicKey(
@@ -228,12 +231,55 @@ describe("express_relay", () => {
     await provider.connection.confirmTransaction(
       airdrop_signature_relayer_signer
     );
+
+    let airdrop_signature_admin = await provider.connection.requestAirdrop(
+      admin.publicKey,
+      20 * LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(airdrop_signature_admin);
     console.log("BEFORE 2 End");
   });
 
   // initialize express relay
   before(async () => {
     console.log("BEFORE 3 Start");
+    const erConfig = await PublicKey.findProgramAddressSync(
+      [Buffer.from("config")],
+      expressRelayMinified.programId
+    )[0];
+    const initialBidOwner = PublicKey.findProgramAddressSync(
+      [Buffer.from("metadata"), relayerFeeReceiver.publicKey.toBytes()],
+      expressRelayMinified.programId
+    )[0];
+
+    const balanceConfig = await provider.connection.getBalance(erConfig);
+    if (balanceConfig === 0) {
+      await expressRelayMinified.methods
+        .initialize()
+        .accounts({
+          admin: admin.publicKey,
+        })
+        .rpc();
+    }
+
+    const balanceInitialBidOwner = await provider.connection.getBalance(
+      initialBidOwner
+    );
+    if (balanceInitialBidOwner === 0) {
+      const tx = await expressRelayMinified.methods
+        .initializeRelayer({
+          splitProtocolDefault: splitProtocolDefault,
+          splitRelayer: splitRelayer,
+        })
+        .accountsPartial({
+          relayerSigner: relayerSigner.publicKey,
+          relayerFeeReceiver: relayerFeeReceiver.publicKey,
+          admin: admin.publicKey,
+        })
+        .signers([admin])
+        .rpc();
+    }
+
     const balanceExpressRelayMetadata = await provider.connection.getBalance(
       expressRelayMetadata[0]
     );
@@ -668,342 +714,437 @@ describe("express_relay", () => {
     console.log("BEFORE 5 End");
   });
 
-  it("Empty Express Relay transaction (for sizing)", async () => {
+  it("Empty Express Relay Minified transaction (for sizing)", async () => {
     let permissionIdEmpty = new Uint8Array(32);
-    let validUntilEmpty = new anchor.BN(200_000_000_000);
-    let bidAmountEmpty = new anchor.BN(0);
-    let protocolEmpty = new PublicKey(0);
 
-    let tokenAmounts = {
-      sellTokens: [
-        {
-          mint: mintCollateral.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-      buyTokens: [
-        {
-          mint: mintDebt.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-    };
+    const initialBidOwner = PublicKey.findProgramAddressSync(
+      [Buffer.from("metadata"), relayerFeeReceiver.publicKey.toBytes()],
+      expressRelayMinified.programId
+    )[0];
+    const maker = anchor.web3.Keypair.generate();
+    const bidProtocol = anchor.web3.Keypair.generate().publicKey; // some random thing for now
+    const bidReceiver = (
+      await tokenWsol.getOrCreateAssociatedAccountInfo(maker.publicKey)
+    ).address;
 
-    for (let opportunityAdapter of [true, false]) {
-      if (opportunityAdapter) {
-        console.log(
-          "Constructing the empty transaction with OpportunityAdapter"
-        );
-      } else {
-        console.log(
-          "Constructing the empty transaction without OpportunityAdapter"
-        );
-      }
-      let txExpressRelayEmpty = await constructExpressRelayTransaction(
-        provider.connection,
-        expressRelay,
-        relayerSigner,
-        relayerFeeReceiver,
-        searcher,
-        protocolEmpty,
-        permissionIdEmpty,
-        bidAmountEmpty,
-        validUntilEmpty,
-        [],
-        tokenAmounts,
-        opportunityAdapter,
-        [],
-        true
-      );
-      await sendAndConfirmVersionedTransaction(
-        provider.connection,
-        txExpressRelayEmpty
-      );
-    }
-  });
+    const txMinified = new anchor.web3.Transaction();
+    txMinified.add(
+      await expressRelayMinified.methods
+        .permission({
+          permissionId: Array.from(permissionIdEmpty),
+          bidAmount: new anchor.BN(1000),
+        })
+        .accountsPartial({
+          bidToken: wsolTaSearcher.address,
+          bidProtocol: bidProtocol,
+          bidMint: WRAPPED_SOL_MINT,
+          bidReceiver: bidReceiver,
+          relayerSigner: relayerSigner.publicKey,
+          expressRelayMetadata: initialBidOwner,
+          relayerFeeReceiver: relayerFeeReceiver.publicKey,
+        })
+        .instruction()
+    );
 
-  it("EzLend liquidation (with/without Opportunity Adapter)", async () => {
-    let bidAmount = new anchor.BN(100_000_000);
-    let validUntil = new anchor.BN(200_000_000_000_000);
+    txMinified.feePayer = maker.publicKey;
 
-    let opportunityAdapterSettingsList = [
-      {
-        opportunityAdapter: false,
-        vaultEzLend: vaultEzLend1,
-        vaultIdEzLend: vaultIdEzLend1,
-        permissionEzLend: permissionEzLend1,
-      },
-      {
-        opportunityAdapter: true,
-        vaultEzLend: vaultEzLend2,
-        vaultIdEzLend: vaultIdEzLend2,
-        permissionEzLend: permissionEzLend2,
-      },
+    console.log(
+      "SIZE of transaction (no lookup tables): ",
+      getTxSize(txMinified, maker.publicKey, true)
+    );
+
+    const lutAccounts = [
+      relayerSigner.publicKey,
+      relayerFeeReceiver.publicKey,
+      maker.publicKey,
+      bidProtocol,
+      WRAPPED_SOL_MINT,
+      bidReceiver,
+      initialBidOwner,
+      anchor.web3.SystemProgram.programId,
+      TOKEN_PROGRAM_ID,
+      anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
     ];
+    const lookupTable = await createAndPopulateLookupTable(
+      provider.connection,
+      new Set(lutAccounts),
+      relayerSigner,
+      relayerSigner
+    );
 
-    // let opportunityAdapterSettings = opportunityAdapterSettingsList[1];
-    for (let opportunityAdapterSettings of opportunityAdapterSettingsList) {
-      let vaultEzLend = opportunityAdapterSettings.vaultEzLend;
-      let vaultIdEzLend = opportunityAdapterSettings.vaultIdEzLend;
-      let permissionEzLend = opportunityAdapterSettings.permissionEzLend;
-      let opportunityAdapter = opportunityAdapterSettings.opportunityAdapter;
+    // construct original tx with lookup table
+    const lookupTableAccount = (
+      await provider.connection.getAddressLookupTable(lookupTable)
+    ).value;
 
-      // get token balances pre liquidation
-      let balanceCollateralSearcherPre = await getTokenAccountBalance(
-        provider,
-        ataCollateralSearcher.address
-      );
-      let balanceDebtSearcherPre = await getTokenAccountBalance(
-        provider,
-        ataDebtSearcher.address
-      );
-      let balanceCollateralProtocolPre = await getTokenAccountBalance(
-        provider,
-        taCollateralProtocol[0]
-      );
-      let balanceDebtProtocolPre = await getTokenAccountBalance(
-        provider,
-        taDebtProtocol[0]
-      );
+    const latestBlockHash = await provider.connection.getLatestBlockhash();
+    const messageV0 = new TransactionMessage({
+      payerKey: maker.publicKey,
+      recentBlockhash: latestBlockHash.blockhash,
+      instructions: txMinified.instructions, // note this is an array of instructions
+    }).compileToV0Message([lookupTableAccount]);
 
-      let txResponse = await constructAndSendEzLendLiquidateTransaction(
-        provider.connection,
-        relayerSigner,
-        relayerFeeReceiver,
-        vaultEzLend,
-        vaultIdEzLend,
-        permissionEzLend,
-        searcher,
-        {
-          mint: mintCollateral.publicKey,
-          ataSearcher: ataCollateralSearcher.address,
-          ataRelayer: ataCollateralRelayer,
-          taProtocol: taCollateralProtocol[0],
-          amount: collateralAmountEzLend,
-        },
-        {
-          mint: mintDebt.publicKey,
-          ataSearcher: ataDebtSearcher.address,
-          ataRelayer: ataDebtRelayer,
-          taProtocol: taDebtProtocol[0],
-          amount: debtAmountEzLend,
-        },
-        ezLend,
-        expressRelay,
-        bidAmount,
-        validUntil,
-        opportunityAdapter
-      );
+    // create a v0 transaction from the v0 message
+    const transactionV0 = new VersionedTransaction(messageV0);
 
-      // get token balances post liquidation
-      let balanceCollateralSearcherPost = await getTokenAccountBalance(
-        provider,
-        ataCollateralSearcher.address
-      );
-      let balanceDebtSearcherPost = await getTokenAccountBalance(
-        provider,
-        ataDebtSearcher.address
-      );
-      let balanceCollateralProtocolPost = await getTokenAccountBalance(
-        provider,
-        taCollateralProtocol[0]
-      );
-      let balanceDebtProtocolPost = await getTokenAccountBalance(
-        provider,
-        taDebtProtocol[0]
-      );
+    console.log(maker.publicKey);
+    console.log(expressRelayMinified.programId);
+    console.log(wsolTaSearcher.address);
+    console.log(bidProtocol);
+    console.log(WRAPPED_SOL_MINT);
+    console.log(bidReceiver);
+    console.log(relayerSigner.publicKey);
+    console.log(initialBidOwner);
+    console.log(relayerFeeReceiver.publicKey);
+    console.log(" ");
+    console.log(" ");
 
-      assert(
-        balanceCollateralSearcherPost - balanceCollateralSearcherPre ===
-          collateralAmountEzLend.toNumber()
-      );
-      assert(
-        balanceDebtSearcherPre - balanceDebtSearcherPost ===
-          debtAmountEzLend.toNumber()
-      );
-      assert(
-        balanceCollateralProtocolPre - balanceCollateralProtocolPost ===
-          collateralAmountEzLend.toNumber()
-      );
-      assert(
-        balanceDebtProtocolPost - balanceDebtProtocolPre ===
-          debtAmountEzLend.toNumber()
-      );
-    }
+    console.log(messageV0.staticAccountKeys);
+    const sizeVersionedTx = getVersionedTxSize(
+      transactionV0,
+      maker.publicKey,
+      true
+    );
+
+    console.log("ESTIMATE OF versioned tx size: ", sizeVersionedTx);
   });
 
-  it("Kamino liquidation liquidate directly (with/without Opportunity Adapter)", async () => {
-    let permissionIdEmpty = new Uint8Array(32);
-    let validUntilEmpty = new anchor.BN(200_000_000_000);
-    let bidAmountEmpty = new anchor.BN(0);
-    let protocolEmpty = new PublicKey(0);
+  // it("Empty Express Relay transaction (for sizing)", async () => {
+  //   let permissionIdEmpty = new Uint8Array(32);
+  //   let validUntilEmpty = new anchor.BN(200_000_000_000);
+  //   let bidAmountEmpty = new anchor.BN(0);
+  //   let protocolEmpty = new PublicKey(0);
 
-    // create kamino liquidation instruction, kaminoElimIxs toggles which instructions to remove from Kamino result
-    let liquidationAmount: number = 4;
-    ixsKaminoLiq = await liquidateAndRedeem(
-      kaminoMarketVar,
-      liquidatorVar,
-      liquidationAmount,
-      kaminoMarketVar.getReserveBySymbol("SOL"),
-      kaminoMarketVar.getReserveBySymbol("USDC"),
-      oblig,
-      configLiquidation,
-      kaminoElimIxs
-    );
+  //   let tokenAmounts = {
+  //     sellTokens: [
+  //       {
+  //         mint: mintCollateral.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //     buyTokens: [
+  //       {
+  //         mint: mintDebt.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //   };
 
-    kaminoLiquidationLookupTables = await getLiquidationLookupTables(
-      provider.connection,
-      klendProgramId,
-      new PublicKey(kaminoMarketVar.address),
-      liquidatorVar
-    );
+  //   for (let opportunityAdapter of [true, false]) {
+  //     if (opportunityAdapter) {
+  //       console.log(
+  //         "Constructing the empty transaction with OpportunityAdapter"
+  //       );
+  //     } else {
+  //       console.log(
+  //         "Constructing the empty transaction without OpportunityAdapter"
+  //       );
+  //     }
+  //     let txExpressRelayEmpty = await constructExpressRelayTransaction(
+  //       provider.connection,
+  //       expressRelay,
+  //       relayerSigner,
+  //       relayerFeeReceiver,
+  //       searcher,
+  //       protocolEmpty,
+  //       permissionIdEmpty,
+  //       bidAmountEmpty,
+  //       validUntilEmpty,
+  //       [],
+  //       tokenAmounts,
+  //       opportunityAdapter,
+  //       [],
+  //       true
+  //     );
+  //     await sendAndConfirmVersionedTransaction(
+  //       provider.connection,
+  //       txExpressRelayEmpty
+  //     );
+  //   }
+  // });
 
-    let tokenAmounts = {
-      sellTokens: [
-        {
-          mint: mintCollateral.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-      buyTokens: [
-        {
-          mint: mintDebt.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-    };
+  // it("EzLend liquidation (with/without Opportunity Adapter)", async () => {
+  //   let bidAmount = new anchor.BN(100_000_000);
+  //   let validUntil = new anchor.BN(200_000_000_000_000);
 
-    for (let opportunityAdapter of [true, false]) {
-      if (opportunityAdapter) {
-        console.log(
-          "Constructing the Kamino direct liquidate transaction with OpportunityAdapter"
-        );
-      } else {
-        console.log(
-          "Constructing the Kamino direct liquidate transaction without OpportunityAdapter"
-        );
-      }
-      let txExpressRelayKamino = await constructExpressRelayTransaction(
-        provider.connection,
-        expressRelay,
-        relayerSigner,
-        relayerFeeReceiver,
-        liquidatorVar,
-        protocolEmpty,
-        permissionIdEmpty,
-        bidAmountEmpty,
-        validUntilEmpty,
-        ixsKaminoLiq,
-        tokenAmounts,
-        opportunityAdapter,
-        kaminoLiquidationLookupTables
-      );
-    }
-  });
+  //   let opportunityAdapterSettingsList = [
+  //     {
+  //       opportunityAdapter: false,
+  //       vaultEzLend: vaultEzLend1,
+  //       vaultIdEzLend: vaultIdEzLend1,
+  //       permissionEzLend: permissionEzLend1,
+  //     },
+  //     {
+  //       opportunityAdapter: true,
+  //       vaultEzLend: vaultEzLend2,
+  //       vaultIdEzLend: vaultIdEzLend2,
+  //       permissionEzLend: permissionEzLend2,
+  //     },
+  //   ];
 
-  it("Kamino liquidation swap and liquidate (with/without Opportunity Adapter)", async () => {
-    let permissionIdEmpty = new Uint8Array(32);
-    let validUntilEmpty = new anchor.BN(200_000_000_000);
-    let bidAmountEmpty = new anchor.BN(0);
-    let protocolEmpty = new PublicKey(0);
+  //   // let opportunityAdapterSettings = opportunityAdapterSettingsList[1];
+  //   for (let opportunityAdapterSettings of opportunityAdapterSettingsList) {
+  //     let vaultEzLend = opportunityAdapterSettings.vaultEzLend;
+  //     let vaultIdEzLend = opportunityAdapterSettings.vaultIdEzLend;
+  //     let permissionEzLend = opportunityAdapterSettings.permissionEzLend;
+  //     let opportunityAdapter = opportunityAdapterSettings.opportunityAdapter;
 
-    let targets: TokenCount[] = [
-      {
-        symbol: "USDC",
-        target: 2,
-      },
-      {
-        symbol: "USDH",
-        target: 3,
-      },
-      {
-        symbol: "SOL",
-        target: 1,
-      },
-    ];
+  //     // get token balances pre liquidation
+  //     let balanceCollateralSearcherPre = await getTokenAccountBalance(
+  //       provider,
+  //       ataCollateralSearcher.address
+  //     );
+  //     let balanceDebtSearcherPre = await getTokenAccountBalance(
+  //       provider,
+  //       ataDebtSearcher.address
+  //     );
+  //     let balanceCollateralProtocolPre = await getTokenAccountBalance(
+  //       provider,
+  //       taCollateralProtocol[0]
+  //     );
+  //     let balanceDebtProtocolPre = await getTokenAccountBalance(
+  //       provider,
+  //       taDebtProtocol[0]
+  //     );
 
-    let walletBalances = await getWalletBalances(
-      provider.connection,
-      kaminoMarketVar,
-      liquidatorVar,
-      tokensOracleVar
-    );
+  //     let txResponse = await constructAndSendEzLendLiquidateTransaction(
+  //       provider.connection,
+  //       relayerSigner,
+  //       relayerFeeReceiver,
+  //       vaultEzLend,
+  //       vaultIdEzLend,
+  //       permissionEzLend,
+  //       searcher,
+  //       {
+  //         mint: mintCollateral.publicKey,
+  //         ataSearcher: ataCollateralSearcher.address,
+  //         ataRelayer: ataCollateralRelayer,
+  //         taProtocol: taCollateralProtocol[0],
+  //         amount: collateralAmountEzLend,
+  //       },
+  //       {
+  //         mint: mintDebt.publicKey,
+  //         ataSearcher: ataDebtSearcher.address,
+  //         ataRelayer: ataDebtRelayer,
+  //         taProtocol: taDebtProtocol[0],
+  //         amount: debtAmountEzLend,
+  //       },
+  //       ezLend,
+  //       expressRelay,
+  //       bidAmount,
+  //       validUntil,
+  //       opportunityAdapter
+  //     );
 
-    const tokenInfos = aggregateUserTokenInfo(
-      liquidityTokenMintsVar,
-      tokensOracleVar,
-      walletBalances.liquidityBalances,
-      liquidatorVar,
-      targets
-    );
-    const baseTokenInfo = tokenInfos.find(({ symbol }) => symbol === "USDH");
-    const amountToSwap = 1000;
+  //     // get token balances post liquidation
+  //     let balanceCollateralSearcherPost = await getTokenAccountBalance(
+  //       provider,
+  //       ataCollateralSearcher.address
+  //     );
+  //     let balanceDebtSearcherPost = await getTokenAccountBalance(
+  //       provider,
+  //       ataDebtSearcher.address
+  //     );
+  //     let balanceCollateralProtocolPost = await getTokenAccountBalance(
+  //       provider,
+  //       taCollateralProtocol[0]
+  //     );
+  //     let balanceDebtProtocolPost = await getTokenAccountBalance(
+  //       provider,
+  //       taDebtProtocol[0]
+  //     );
 
-    // set to ensure jupiter txs are constructed
-    const jupiter = new Jupiter(liquidatorVar, provider.connection, env);
-    const cluster = "localnet";
+  //     assert(
+  //       balanceCollateralSearcherPost - balanceCollateralSearcherPre ===
+  //         collateralAmountEzLend.toNumber()
+  //     );
+  //     assert(
+  //       balanceDebtSearcherPre - balanceDebtSearcherPost ===
+  //         debtAmountEzLend.toNumber()
+  //     );
+  //     assert(
+  //       balanceCollateralProtocolPre - balanceCollateralProtocolPost ===
+  //         collateralAmountEzLend.toNumber()
+  //     );
+  //     assert(
+  //       balanceDebtProtocolPost - balanceDebtProtocolPre ===
+  //         debtAmountEzLend.toNumber()
+  //     );
+  //   }
+  // });
 
-    ixsKaminoLiq = await swapAndLiquidate(
-      provider.connection,
-      kaminoMarketVar,
-      liquidatorVar,
-      oblig,
-      amountToSwap,
-      kaminoMarketVar.getReserveBySymbol("SOL"),
-      kaminoMarketVar.getReserveBySymbol("USDC"),
-      baseTokenInfo,
-      jupiter,
-      cluster,
-      configLiquidation
-    );
+  // it("Kamino liquidation liquidate directly (with/without Opportunity Adapter)", async () => {
+  //   let permissionIdEmpty = new Uint8Array(32);
+  //   let validUntilEmpty = new anchor.BN(200_000_000_000);
+  //   let bidAmountEmpty = new anchor.BN(0);
+  //   let protocolEmpty = new PublicKey(0);
 
-    kaminoLiquidationLookupTables = await getLiquidationLookupTables(
-      provider.connection,
-      klendProgramId,
-      new PublicKey(kaminoMarketVar.address),
-      liquidatorVar
-    );
+  //   // create kamino liquidation instruction, kaminoElimIxs toggles which instructions to remove from Kamino result
+  //   let liquidationAmount: number = 4;
+  //   ixsKaminoLiq = await liquidateAndRedeem(
+  //     kaminoMarketVar,
+  //     liquidatorVar,
+  //     liquidationAmount,
+  //     kaminoMarketVar.getReserveBySymbol("SOL"),
+  //     kaminoMarketVar.getReserveBySymbol("USDC"),
+  //     oblig,
+  //     configLiquidation,
+  //     kaminoElimIxs
+  //   );
 
-    let tokenAmounts = {
-      sellTokens: [
-        {
-          mint: mintCollateral.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-      buyTokens: [
-        {
-          mint: mintDebt.publicKey,
-          amount: new anchor.BN(0),
-        },
-      ],
-    };
+  //   kaminoLiquidationLookupTables = await getLiquidationLookupTables(
+  //     provider.connection,
+  //     klendProgramId,
+  //     new PublicKey(kaminoMarketVar.address),
+  //     liquidatorVar
+  //   );
 
-    for (let opportunityAdapter of [true, false]) {
-      if (opportunityAdapter) {
-        console.log(
-          "Constructing the Kamino swap & liquidate transaction with OpportunityAdapter"
-        );
-      } else {
-        console.log(
-          "Constructing the Kamino swap & liquidate transaction without OpportunityAdapter"
-        );
-      }
-      let txExpressRelayKamino = await constructExpressRelayTransaction(
-        provider.connection,
-        expressRelay,
-        relayerSigner,
-        relayerFeeReceiver,
-        liquidatorVar,
-        protocolEmpty,
-        permissionIdEmpty,
-        bidAmountEmpty,
-        validUntilEmpty,
-        ixsKaminoLiq,
-        tokenAmounts,
-        opportunityAdapter,
-        kaminoLiquidationLookupTables
-      );
-    }
-  });
+  //   let tokenAmounts = {
+  //     sellTokens: [
+  //       {
+  //         mint: mintCollateral.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //     buyTokens: [
+  //       {
+  //         mint: mintDebt.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //   };
+
+  //   for (let opportunityAdapter of [true, false]) {
+  //     if (opportunityAdapter) {
+  //       console.log(
+  //         "Constructing the Kamino direct liquidate transaction with OpportunityAdapter"
+  //       );
+  //     } else {
+  //       console.log(
+  //         "Constructing the Kamino direct liquidate transaction without OpportunityAdapter"
+  //       );
+  //     }
+  //     let txExpressRelayKamino = await constructExpressRelayTransaction(
+  //       provider.connection,
+  //       expressRelay,
+  //       relayerSigner,
+  //       relayerFeeReceiver,
+  //       liquidatorVar,
+  //       protocolEmpty,
+  //       permissionIdEmpty,
+  //       bidAmountEmpty,
+  //       validUntilEmpty,
+  //       ixsKaminoLiq,
+  //       tokenAmounts,
+  //       opportunityAdapter,
+  //       kaminoLiquidationLookupTables
+  //     );
+  //   }
+  // });
+
+  // it("Kamino liquidation swap and liquidate (with/without Opportunity Adapter)", async () => {
+  //   let permissionIdEmpty = new Uint8Array(32);
+  //   let validUntilEmpty = new anchor.BN(200_000_000_000);
+  //   let bidAmountEmpty = new anchor.BN(0);
+  //   let protocolEmpty = new PublicKey(0);
+
+  //   let targets: TokenCount[] = [
+  //     {
+  //       symbol: "USDC",
+  //       target: 2,
+  //     },
+  //     {
+  //       symbol: "USDH",
+  //       target: 3,
+  //     },
+  //     {
+  //       symbol: "SOL",
+  //       target: 1,
+  //     },
+  //   ];
+
+  //   let walletBalances = await getWalletBalances(
+  //     provider.connection,
+  //     kaminoMarketVar,
+  //     liquidatorVar,
+  //     tokensOracleVar
+  //   );
+
+  //   const tokenInfos = aggregateUserTokenInfo(
+  //     liquidityTokenMintsVar,
+  //     tokensOracleVar,
+  //     walletBalances.liquidityBalances,
+  //     liquidatorVar,
+  //     targets
+  //   );
+  //   const baseTokenInfo = tokenInfos.find(({ symbol }) => symbol === "USDH");
+  //   const amountToSwap = 1000;
+
+  //   // set to ensure jupiter txs are constructed
+  //   const jupiter = new Jupiter(liquidatorVar, provider.connection, env);
+  //   const cluster = "localnet";
+
+  //   ixsKaminoLiq = await swapAndLiquidate(
+  //     provider.connection,
+  //     kaminoMarketVar,
+  //     liquidatorVar,
+  //     oblig,
+  //     amountToSwap,
+  //     kaminoMarketVar.getReserveBySymbol("SOL"),
+  //     kaminoMarketVar.getReserveBySymbol("USDC"),
+  //     baseTokenInfo,
+  //     jupiter,
+  //     cluster,
+  //     configLiquidation
+  //   );
+
+  //   kaminoLiquidationLookupTables = await getLiquidationLookupTables(
+  //     provider.connection,
+  //     klendProgramId,
+  //     new PublicKey(kaminoMarketVar.address),
+  //     liquidatorVar
+  //   );
+
+  //   let tokenAmounts = {
+  //     sellTokens: [
+  //       {
+  //         mint: mintCollateral.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //     buyTokens: [
+  //       {
+  //         mint: mintDebt.publicKey,
+  //         amount: new anchor.BN(0),
+  //       },
+  //     ],
+  //   };
+
+  //   for (let opportunityAdapter of [true, false]) {
+  //     if (opportunityAdapter) {
+  //       console.log(
+  //         "Constructing the Kamino swap & liquidate transaction with OpportunityAdapter"
+  //       );
+  //     } else {
+  //       console.log(
+  //         "Constructing the Kamino swap & liquidate transaction without OpportunityAdapter"
+  //       );
+  //     }
+  //     let txExpressRelayKamino = await constructExpressRelayTransaction(
+  //       provider.connection,
+  //       expressRelay,
+  //       relayerSigner,
+  //       relayerFeeReceiver,
+  //       liquidatorVar,
+  //       protocolEmpty,
+  //       permissionIdEmpty,
+  //       bidAmountEmpty,
+  //       validUntilEmpty,
+  //       ixsKaminoLiq,
+  //       tokenAmounts,
+  //       opportunityAdapter,
+  //       kaminoLiquidationLookupTables
+  //     );
+  //   }
+  // });
 });
