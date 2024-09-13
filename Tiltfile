@@ -153,11 +153,42 @@ local_resource(
     resource_deps=["svm-localnet"],
 )
 
-# need to run initialize instructions for the programs one time, script skips if already initialized
+# creates mints for sell and buy tokens, creates and funds ATAs for searcher and admin
+local_resource(
+    "svm-create-mints",
+    """solana-keygen new -o keypairs/mint_buy.json -f --no-bip39-passphrase \
+        && solana-keygen new -o keypairs/mint_sell.json -f --no-bip39-passphrase \
+        && spl-token create-token --fee-payer keypairs/admin.json --mint-authority keypairs/admin.json -ul keypairs/mint_sell.json \
+        && spl-token create-token --fee-payer keypairs/admin.json --mint-authority keypairs/admin.json -ul keypairs/mint_buy.json \
+        && spl-token create-account keypairs/mint_buy.json --fee-payer keypairs/admin.json --owner keypairs/searcher.json \
+        && spl-token create-account keypairs/mint_sell.json --fee-payer keypairs/admin.json --owner keypairs/searcher.json \
+        && spl-token create-account keypairs/mint_buy.json --fee-payer keypairs/admin.json --owner keypairs/admin.json \
+        && spl-token create-account keypairs/mint_sell.json --fee-payer keypairs/admin.json --owner keypairs/admin.json \
+        && spl-token mint keypairs/mint_buy.json 1000000000 --recipient-owner keypairs/searcher.json --mint-authority keypairs/admin.json \
+        && spl-token mint keypairs/mint_sell.json 1000000000 --recipient-owner keypairs/searcher.json --mint-authority keypairs/admin.json \
+        && spl-token mint keypairs/mint_buy.json 1000000000 --recipient-owner keypairs/admin.json --mint-authority keypairs/admin.json \
+        && spl-token mint keypairs/mint_sell.json 1000000000 --recipient-owner keypairs/admin.json --mint-authority keypairs/admin.json""",
+    resource_deps=["svm-setup-accounts"]
+)
+
+# need to run initialize instructions for the express relay program one time, script skips if already initialized
 local_resource(
     "svm-initialize-programs",
     "poetry -C per_sdk run python3 -m per_sdk.svm.initialize_programs -v --file-private-key-payer keypairs/searcher.json --file-private-key-admin keypairs/admin.json --file-private-key-relayer-signer keypairs/relayer_signer.json --express-relay-program GwEtasTAxdS9neVE4GPUpcwR7DB7AizntQSPcG36ubZM --rpc-url %s" % rpc_url_solana,
     resource_deps=["svm-setup-accounts"]
+)
+
+# need to run initialize and create order instructions for the limo program
+local_resource(
+    "svm-initialize-limo",
+    '''npm run initialize-limo -- \
+        --filepath-sk-admin="../../keypairs/admin.json" \
+        --filepath-sk-searcher="../../keypairs/searcher.json" \
+        --filepath-mint-input="../../keypairs/mint_buy.json" \
+        --filepath-mint-output="../../keypairs/mint_sell.json" \
+        --endpoint-svm="%s"''' % rpc_url_solana,
+    dir="per_sdk/svm",
+    resource_deps=["svm-setup-accounts", "svm-create-mints"]
 )
 
 # craft dummy tx, submits as a bid to auction server or submits relayer-signed tx directly to solana cluster

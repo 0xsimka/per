@@ -33,6 +33,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def create_or_get_keypair(
+    account: str, keypairs_dir: Path, logger: logging.Logger
+) -> Keypair:
+    file_path = keypairs_dir / f"{account}.json"
+    if not file_path.exists():
+        kp = Keypair()
+        with file_path.open("w") as f:
+            json.dump(kp.to_bytes_array(), f)
+            logger.info(f"Created and saved {account} keypair")
+    else:
+        logger.info(f"Reusing existing {account} keypair")
+        kp = read_kp_from_json(file_path)
+
+    return kp
+
+
+async def airdrop_to_account(
+    client: AsyncClient,
+    account: str,
+    amount: int,
+    keypairs_dir: Path,
+    logger: logging.Logger,
+):
+    kp = create_or_get_keypair(account, keypairs_dir, logger)
+    airdrop_sig = (await client.request_airdrop(kp.pubkey(), amount)).value
+    conf = await client.confirm_transaction(airdrop_sig)
+    assert conf.value[0].status is None, f"Airdrop to {account} failed"
+    logger.info(f"Airdrop to {account} successful")
+
+
 async def main():
     args = parse_args()
 
@@ -45,21 +75,9 @@ async def main():
         keypairs_dir.mkdir(exist_ok=True, parents=True)
 
     for account in ["searcher", "admin", "relayer_signer"]:
-        file_path = keypairs_dir / f"{account}.json"
-        if not file_path.exists():
-            kp = Keypair()
-            with file_path.open("w") as f:
-                json.dump(kp.to_bytes_array(), f)
-                logger.info(f"Created and saved {account} keypair")
-        else:
-            logger.info(f"Reusing existing {account} keypair")
-            kp = read_kp_from_json(file_path)
-        airdrop_sig = (
-            await client.request_airdrop(kp.pubkey(), args.airdrop_amount)
-        ).value
-        conf = await client.confirm_transaction(airdrop_sig)
-        assert conf.value[0].status is None, f"Airdrop to {account} failed"
-        logger.info(f"Airdrop to {account} successful")
+        await airdrop_to_account(
+            client, account, args.airdrop_amount, keypairs_dir, logger
+        )
 
 
 if __name__ == "__main__":

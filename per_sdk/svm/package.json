@@ -1,0 +1,21 @@
+{
+  "name": "limo-actions",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "initialize-limo": "npm run build && node lib/index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@kamino-finance/limo-sdk": "^0.1.0",
+    "@solana/web3.js": "^1.95.3",
+    "@types/yargs": "^17.0.33",
+    "bs58": "^6.0.0",
+    "decimal.js": "^10.4.3",
+    "yargs": "^17.7.2"
+  }
+}

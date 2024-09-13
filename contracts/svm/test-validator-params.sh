@@ -6,6 +6,8 @@ function print_args {
   # dummy program
   echo "--bpf-program HYCgALnu6CM2gkQVopa1HGaNf8Vzbs9bomWRiKP267P3 ./target/deploy/dummy.so"
 
+  echo "--clone-upgradeable-program LiMoM9rMhrdYrfzUCxQppvxCSG1FcrUK9G8uLq4A1GF -um"
+
   # options
   echo "--reset"
 }
