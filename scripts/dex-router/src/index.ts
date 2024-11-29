@@ -437,13 +437,16 @@ const argv = yargs(hideBin(process.argv))
   .parseSync();
 
 async function run() {
-  console.log(`version 9`);
+  console.log(`version 10`);
   const maxaccs = argv["options-max-accounts-jupiter"].map((maxAccounts) =>
     Number(maxAccounts)
   );
   console.log("Node.js version:", process.version);
   console.log(`maxaccs: ${maxaccs}`);
   console.log(`argv maxaccs: ${argv["options-max-accounts-jupiter"]}`);
+  if (!Array.isArray(maxaccs)) {
+    throw new Error("maxaccs is not an array");
+  }
 
   const connection = new Connection(argv["endpoint-svm"], "confirmed");
   const dexRouter = new DexRouter(
