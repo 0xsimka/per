@@ -437,7 +437,7 @@ const argv = yargs(hideBin(process.argv))
   .parseSync();
 
 async function run() {
-  console.log(`version 11`);
+  console.log(`version 12`);
   const maxaccs = argv["options-max-accounts-jupiter"].map((maxAccounts) =>
     Number(maxAccounts)
   );
