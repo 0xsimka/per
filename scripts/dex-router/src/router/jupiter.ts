@@ -38,7 +38,7 @@ export class JupiterRouter implements Router {
         basePath,
       });
     }
-    this.quoteurl = new URL(`${basePath}/quote`);
+    this.quoteurl = new URL(`${basePath}/${apiKey}/quote`);
   }
 
   async route(
@@ -55,7 +55,7 @@ export class JupiterRouter implements Router {
     console.log(`amountIn: ${amountIn}`);
     console.log(`url: ${this.quoteurl.toString()}`);
     console.log(`debugging, does this msg show up?`);
-    console.log(`once more version 1`);
+    console.log(`once more version 2`);
 
     const quoteResponseDumb = await fetch(
       `${this.quoteurl.toString()}?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=50000000&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=${
