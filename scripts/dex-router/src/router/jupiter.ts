@@ -13,6 +13,7 @@ export class JupiterRouter implements Router {
   private executor: PublicKey;
   private maxAccounts: number;
   private jupiterClient: DefaultApi;
+  private quoteurl: URL;
 
   constructor(
     chainId: string,
@@ -37,6 +38,7 @@ export class JupiterRouter implements Router {
         basePath,
       });
     }
+    this.quoteurl = new URL(`${basePath}/quote`);
   }
 
   async route(
@@ -54,6 +56,16 @@ export class JupiterRouter implements Router {
     console.log(`debugging, does this msg show up?`);
     console.log(`once more`);
 
+    const quoteResponseDumb = await fetch(
+      `${this.quoteurl.toString()}?inputMint=${tokenIn.toBase58()}&outputMint=${tokenOut.toBase58()}&amount=${amountIn}&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=${
+        this.maxAccounts
+      }`
+    );
+    console.log(
+      `quoteResponseDumb: ${quoteResponseDumb.status}, ${quoteResponseDumb.statusText}, ${quoteResponseDumb.body}`
+    );
+    console.log(`quoteResponseDumb: ${quoteResponseDumb}`);
+
     const quoteResponse = await this.jupiterClient.quoteGet({
       inputMint: tokenIn.toBase58(),
       outputMint: tokenOut.toBase58(),
@@ -63,7 +75,7 @@ export class JupiterRouter implements Router {
       maxAccounts: this.maxAccounts,
     });
 
-    console.log(`Jupiter quote response: ${JSON.stringify(quoteResponse)}`);
+    // console.log(`Jupiter quote response: ${JSON.stringify(quoteResponse)}`);
 
     const instructions = await this.jupiterClient.swapInstructionsPost({
       swapRequest: {
@@ -72,7 +84,7 @@ export class JupiterRouter implements Router {
       },
     });
 
-    console.log(`Jupiter swap instructions: ${JSON.stringify(instructions)}`);
+    // console.log(`Jupiter swap instructions: ${JSON.stringify(instructions)}`);
 
     const { setupInstructions, swapInstruction, addressLookupTableAddresses } =
       instructions;
@@ -109,3 +121,14 @@ export class JupiterRouter implements Router {
     });
   }
 }
+
+// function quoteGetRaw(requestParameters: QuoteGetRequest, queryParameters: any) {
+//   const headerParameters = {};
+//   const response = fetch({
+//     path: `/quote`,
+//     method: "GET",
+//     headers: headerParameters,
+//     query: queryParameters
+//   });
+//   return new JSONApiResponse(response, (jsonValue) => QuoteResponseFromJSON(jsonValue));
+// }
