@@ -438,14 +438,15 @@ const argv = yargs(hideBin(process.argv))
 
 async function run() {
   const connection = new Connection(argv["endpoint-svm"], "confirmed");
+  const maxAccountsArray = argv["options-max-accounts-jupiter"].map(
+    (maxAccounts) => Number(maxAccounts)
+  );
   const dexRouter = new DexRouter(
     argv["endpoint-express-relay"],
     Keypair.fromSecretKey(anchor.utils.bytes.bs58.decode(argv["sk-executor"])),
     argv["chain-id"],
     connection,
-    argv["options-max-accounts-jupiter"].map((maxAccounts) =>
-      Number(maxAccounts)
-    ),
+    maxAccountsArray,
     argv["jupiter-api-endpoint"],
     argv["jupiter-api-key"],
     argv["lookup-table-addresses"]?.map((address) => new PublicKey(address)),
