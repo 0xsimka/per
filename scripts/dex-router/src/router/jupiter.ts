@@ -57,7 +57,7 @@ export class JupiterRouter implements Router {
     console.log(`once more`);
 
     const quoteResponseDumb = await fetch(
-      `${this.quoteurl.toString()}?inputMint=${tokenIn.toBase58()}&outputMint=${tokenOut.toBase58()}&amount=${amountIn}&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=${
+      `${this.quoteurl.toString()}?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=50000000&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=${
         this.maxAccounts
       }`
     );
