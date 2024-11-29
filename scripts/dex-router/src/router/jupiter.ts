@@ -55,7 +55,6 @@ export class JupiterRouter implements Router {
     console.log(`amountIn: ${amountIn}`);
     console.log(`url: ${this.quoteurl.toString()}`);
     console.log(`debugging, does this msg show up?`);
-    console.log(`version 6`);
 
     const string1 = `https://jupiter-swap-api.quiknode.pro/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=50000000&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=${this.maxAccounts}`;
     const string2 = `https://jupiter-swap-api.quiknode.pro/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=So11111111111111111111111111111111111111112&amount=50000000&autoSlippage=true&maxAutoSlippageBps=50&maxAccounts=10`;
