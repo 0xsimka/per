@@ -51,6 +51,7 @@ export class JupiterRouter implements Router {
     console.log(`tokenIn: ${tokenIn.toBase58()}`);
     console.log(`tokenOut: ${tokenOut.toBase58()}`);
     console.log(`amountIn: ${amountIn}`);
+    console.log(`debugging, does this msg show up?`);
 
     const quoteResponse = await this.jupiterClient.quoteGet({
       inputMint: tokenIn.toBase58(),
