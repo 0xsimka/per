@@ -437,11 +437,12 @@ const argv = yargs(hideBin(process.argv))
   .parseSync();
 
 async function run() {
-  console.log(`version 7`);
+  console.log(`version 8`);
   const maxaccs = argv["options-max-accounts-jupiter"].map((maxAccounts) =>
     Number(maxAccounts)
   );
   console.log(`maxaccs: ${maxaccs}`);
+  console.log(`argv maxaccs: ${argv["options-max-accounts-jupiter"]}`);
 
   const connection = new Connection(argv["endpoint-svm"], "confirmed");
   const dexRouter = new DexRouter(
